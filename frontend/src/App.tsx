@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchRoster, fetchBrands, fetchHealth, newGame, scanImages, syncDrive,
   fetchImageStatus, fetchCalendar, advanceMonth, fetchLogos,
-  fetchSettings, saveSettings, money, ageLabel,
+  fetchSettings, saveSettings, money, ageLabel, fetchStoreStatus,
 } from './api'
 import { setSoundEnabled } from './sound'
 import { Avatar, StatCell, OverallBadge, BrandChip, Pill } from './ui'
@@ -68,6 +68,12 @@ export default function App() {
   const { data: roster = [], isLoading, error } = useQuery({ queryKey: ['roster'], queryFn: fetchRoster })
   const { data: brands = [] } = useQuery({ queryKey: ['brands'], queryFn: fetchBrands })
   const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: fetchSettings })
+  // Whether progress is actually being kept. Checked once a minute rather than
+  // once, because linking storage and redeploying should clear the warning
+  // without anyone thinking to reload.
+  const { data: store } = useQuery({
+    queryKey: ['storeStatus'], queryFn: fetchStoreStatus, refetchInterval: 60_000,
+  })
   const soundOn = settings?.sound === 'on'
   useEffect(() => { setSoundEnabled(soundOn) }, [soundOn])
   const toggleSound = useMutation({
@@ -256,6 +262,28 @@ export default function App() {
       {!save && tab !== 'images' && (
         <div className="px-6 py-2 bg-gold/10 border-b border-gold/30 text-xs text-gold">
           No active save — click <strong>New game</strong> to create brands, budgets and championships.
+        </div>
+      )}
+
+      {store && !store.durable && (
+        <div className="px-4 py-2 flex items-center gap-3 text-[12px]"
+          style={{ background: 'rgba(255,43,78,0.14)', borderBottom: '1px solid rgba(255,43,78,0.35)' }}>
+          <span className="label text-[10px] px-1.5 py-[3px] rounded bg-raw/25 text-blood shrink-0">
+            NOT SAVING
+          </span>
+          <span className="text-slate-200">
+            Nothing you do here is being kept — this host wipes its filesystem, and durable
+            storage is not connected. {store.durable_detail}
+          </span>
+          <span className="ml-auto label text-[10px] text-slate-500 shrink-0">
+            mode {store.mode}
+          </span>
+        </div>
+      )}
+      {store?.error && (
+        <div className="px-4 py-2 text-[12px] text-blood"
+          style={{ background: 'rgba(255,43,78,0.10)' }}>
+          Save sync error: {store.error}
         </div>
       )}
 

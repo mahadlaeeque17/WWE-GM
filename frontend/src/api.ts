@@ -600,3 +600,25 @@ export const resolveAllRatingChanges = (approve: boolean, season?: number) =>
   req<any>('/api/ratings/changes/resolve-all', {
     method: 'POST', body: JSON.stringify({ approve, season: season ?? null }),
   })
+
+// ------------------------------------------------------- durable save status
+//
+// `durable` is the only field worth acting on. `mode: "disk"` is correct on a
+// laptop and catastrophic on a serverless host, so the mode alone cannot tell
+// you whether progress is being kept.
+
+export interface StoreStatus {
+  mode: 'disk' | 'dir' | 'blob'
+  enabled: boolean
+  configured: boolean
+  detail: string
+  durable: boolean
+  durable_detail: string
+  ephemeral_host: boolean
+  hydrated: number | null
+  persisted: number | null
+  error: string | null
+  db_bytes: number
+}
+
+export const fetchStoreStatus = () => req<StoreStatus>('/api/store/status')

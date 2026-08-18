@@ -42,10 +42,19 @@ from pathlib import Path
 
 import httpx
 
-MODE = (os.environ.get("GM2000_STORE") or "disk").strip().lower()
-
 # Vercel injects BLOB_READ_WRITE_TOKEN when a Blob store is linked to the project.
 BLOB_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "")
+
+# If a Blob store is linked, USE IT — do not also demand GM2000_STORE=blob.
+#
+# Requiring both meant the common half-configured state (store created and
+# linked, second variable forgotten) ran silently on the throwaway filesystem:
+# the game worked perfectly for one session and lost everything on the next cold
+# start, with nothing on screen to say so. A token that is present is intent
+# enough. Setting GM2000_STORE explicitly still wins, so `disk` remains a way to
+# opt out on a host that has a real volume.
+MODE = (os.environ.get("GM2000_STORE")
+        or ("blob" if BLOB_TOKEN else "disk")).strip().lower()
 BLOB_KEY = os.environ.get("GM2000_BLOB_KEY", "gm2000.db")
 BLOB_API = "https://blob.vercel-storage.com"
 BLOB_API_VERSION = "7"
@@ -54,6 +63,11 @@ BLOB_API_VERSION = "7"
 REMOTE_DIR = os.environ.get("GM2000_REMOTE_DIR", "")
 
 TIMEOUT = 30.0
+
+# Vercel sets VERCEL=1 in every function. It is the difference between "mode is
+# disk and that is correct" (a laptop, a real volume) and "mode is disk and the
+# save is being written to a filesystem that is about to be deleted".
+EPHEMERAL_HOST = bool(os.environ.get("VERCEL") or os.environ.get("GM2000_EPHEMERAL"))
 
 _last: dict[str, object] = {"hydrated": None, "persisted": None, "error": None}
 
@@ -80,13 +94,34 @@ def enabled() -> bool:
     return MODE in ("dir", "blob")
 
 
+def durable() -> tuple[bool, str]:
+    """Will the save actually survive? The single question worth answering.
+
+    `mode: disk` is the right answer on a laptop and a catastrophic one on a
+    serverless host, so the mode alone cannot be reported as healthy — this is
+    what the UI warns on.
+    """
+    ok, detail = _configured()
+    if enabled():
+        return ok, detail
+    if EPHEMERAL_HOST:
+        return False, ("this host wipes its filesystem — link a Blob store so "
+                       "BLOB_READ_WRITE_TOKEN is available, or set GM2000_STORE")
+    return True, detail
+
+
 def status() -> dict:
+    ok, detail = _configured()
+    dur, dur_detail = durable()
     return {
         "mode": MODE,
         "enabled": enabled(),
         "key": BLOB_KEY if MODE == "blob" else REMOTE_DIR,
-        "configured": _configured()[0],
-        "detail": _configured()[1],
+        "configured": ok,
+        "detail": detail,
+        "durable": dur,
+        "durable_detail": dur_detail,
+        "ephemeral_host": EPHEMERAL_HOST,
         **_last,
     }
 
