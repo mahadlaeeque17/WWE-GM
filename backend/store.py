@@ -134,31 +134,55 @@ def _blob_headers() -> dict:
 
 
 def _blob_url() -> str | None:
-    """Find the save's public URL by listing the store.
+    """Find the save's URL by listing the store.
 
     The URL is not derivable from the key alone — Vercel prefixes it with the
     store id — and a fresh container has no memory of the last upload, so it has
-    to be looked up rather than cached.
+    to be looked up rather than cached. `downloadUrl` is preferred where the API
+    returns one, since that is the form a private store expects.
     """
     r = httpx.get(BLOB_API, headers=_blob_headers(), timeout=TIMEOUT,
                   params={"prefix": BLOB_KEY, "limit": "1"})
     r.raise_for_status()
     blobs = r.json().get("blobs") or []
-    for b in blobs:
-        if b.get("pathname") == BLOB_KEY:
-            return b.get("url")
-    return blobs[0].get("url") if blobs else None
+    match = next((b for b in blobs if b.get("pathname") == BLOB_KEY), None)
+    match = match or (blobs[0] if blobs else None)
+    if not match:
+        return None
+    return match.get("downloadUrl") or match.get("url")
 
 
 def _blob_get() -> bytes | None:
+    """Download the save, working with either a PRIVATE or a PUBLIC store.
+
+    A public blob is readable by plain GET; a private one requires the store
+    token. Rather than making the deploy depend on the operator having picked
+    the option this code happens to assume, try authenticated first and fall
+    back — the token only ever goes to Vercel's own storage domain.
+    """
     url = _blob_url()
     if not url:
         return None
-    r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True)
-    if r.status_code == 404:
-        return None
-    r.raise_for_status()
-    return r.content
+
+    attempts = [_blob_headers(), {}] if _is_blob_host(url) else [{}]
+    last = None
+    for headers in attempts:
+        r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True, headers=headers)
+        if r.status_code == 404:
+            return None
+        if r.status_code < 400:
+            return r.content
+        last = r
+    if last is not None:
+        last.raise_for_status()
+    return None
+
+
+def _is_blob_host(url: str) -> bool:
+    """Only ever attach the token to Vercel's own storage domains."""
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    return host.endswith("vercel-storage.com") or host.endswith("vercel.app")
 
 
 def _blob_put(data: bytes) -> None:

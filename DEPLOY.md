@@ -45,8 +45,21 @@ never write, failed requests never write.
 
 ### 1. Create the Blob store
 
-Vercel dashboard → **Storage** → **Create** → **Blob**. Free on Hobby. Connect it
-to the project; Vercel then injects `BLOB_READ_WRITE_TOKEN` automatically.
+Vercel dashboard → **Storage** → **Create** → **Blob**. Free on Hobby.
+
+| Field | Pick | Why |
+|---|---|---|
+| Store Name | `wwe-gm-2000` | just a label |
+| Region | leave the default (`iad1`) | it should match where the function runs — the round trip that matters is function↔blob, not you↔blob |
+| Access | **Private** | it is your save file. Public means anyone holding the URL can download it |
+
+`store.py` reads a private store by sending the store token, and falls back to an
+unauthenticated read if the store turns out to be public — so either choice works
+and the token is only ever sent to a `vercel-storage.com` host.
+
+Then **connect the store to the project**; Vercel injects `BLOB_READ_WRITE_TOKEN`
+automatically. Without that connection the API still boots but reports
+`"configured": false` on `/api/store/status` and the save will not survive.
 
 ### 2. Import the repo
 
