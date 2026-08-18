@@ -57,7 +57,9 @@ MODE = (os.environ.get("GM2000_STORE")
         or ("blob" if BLOB_TOKEN else "disk")).strip().lower()
 BLOB_KEY = os.environ.get("GM2000_BLOB_KEY", "gm2000.db")
 BLOB_API = "https://blob.vercel-storage.com"
-BLOB_API_VERSION = "7"
+# Overridable without a code change: if Vercel moves the API forward and starts
+# rejecting this version, it can be corrected from the dashboard.
+BLOB_API_VERSION = os.environ.get("GM2000_BLOB_API_VERSION", "7")
 
 # Where `dir` mode keeps its copy.
 REMOTE_DIR = os.environ.get("GM2000_REMOTE_DIR", "")
@@ -172,6 +174,25 @@ def _blob_headers() -> dict:
     return {"authorization": f"Bearer {BLOB_TOKEN}", "x-api-version": BLOB_API_VERSION}
 
 
+def _blob_raise(r: httpx.Response, what: str) -> None:
+    """Fail with the RESPONSE BODY, not just the status line.
+
+    Vercel Blob explains a rejection in the body — `{"error":{"code":...}}` —
+    and httpx's raise_for_status throws that away. A bare "400 Bad Request" from
+    a host you cannot attach a debugger to is close to useless; the body names
+    the offending header. The token is never echoed back, so this is safe to
+    surface on /api/store/status.
+    """
+    if r.status_code < 400:
+        return
+    body = ""
+    try:
+        body = " ".join(r.text[:400].split())
+    except Exception:  # noqa: BLE001
+        pass
+    raise RuntimeError(f"{what}: HTTP {r.status_code} — {body or '(empty body)'}")
+
+
 def _blob_url() -> str | None:
     """Find the save's URL by listing the store.
 
@@ -182,7 +203,7 @@ def _blob_url() -> str | None:
     """
     r = httpx.get(BLOB_API, headers=_blob_headers(), timeout=TIMEOUT,
                   params={"prefix": BLOB_KEY, "limit": "1"})
-    r.raise_for_status()
+    _blob_raise(r, "list")
     blobs = r.json().get("blobs") or []
     match = next((b for b in blobs if b.get("pathname") == BLOB_KEY), None)
     match = match or (blobs[0] if blobs else None)
@@ -213,7 +234,7 @@ def _blob_get() -> bytes | None:
             return r.content
         last = r
     if last is not None:
-        last.raise_for_status()
+        _blob_raise(last, "download")
     return None
 
 
@@ -232,12 +253,16 @@ def _blob_put(data: bytes) -> None:
             "x-content-type": "application/octet-stream",
             # Same key every time, and never cached — this is the live save, not
             # an asset. With a random suffix each write would orphan the last.
-            "x-add-random-suffix": "0",
+            # "false", not "0". This flag is parsed as a boolean string, and a
+            # value it does not recognise is rejected as a bad request rather
+            # than ignored — which is one candidate for the 400 seen on the
+            # first real upload.
+            "x-add-random-suffix": "false",
             "x-cache-control-max-age": "0",
         },
         content=data, timeout=TIMEOUT,
     )
-    r.raise_for_status()
+    _blob_raise(r, "upload")
 
 
 # ---------------------------------------------------------------- lifecycle
