@@ -37,7 +37,7 @@ asks the AI to decide a match.
 | `harvester/` | Roster construction and the attribute engine |
 | `data/gm2000.db` | The save: 270 wrestlers, seeded and hand-tuned |
 | `PLAN.md` | Design document — every rule and why it is that rule |
-| `DEPLOY.md` | Hosting notes, and why the backend cannot be serverless |
+| `DEPLOY.md` | Hosting — it runs free on Vercel, and how the save survives |
 | `harvester/NOTES.md` | Data quirks and traps. Read before trusting a number |
 
 ## The rating system
@@ -62,6 +62,19 @@ stored *issue*, not a live query, because last-week and the arrows are history.
 Alongside it, a contender ladder per championship that respects brand
 exclusivity, weight limits and signed role, and names a #1 contender you can
 override by hand.
+
+## Deploying it
+
+The whole thing runs on **Vercel's free plan** — frontend as static files, the
+FastAPI backend as a Python function, and the save in Vercel Blob.
+
+Free hosting is stateless, and this game *is* a SQLite file that gets written on
+every action, so `backend/store.py` pulls the database down at boot and pushes it
+back after each write. The app itself talks to ordinary local SQLite throughout —
+no query anywhere changed. `smoke_store.py` proves it by deleting the entire
+filesystem between two boots and checking the save comes back.
+
+See `DEPLOY.md`.
 
 ## Data
 

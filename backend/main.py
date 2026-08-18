@@ -31,6 +31,7 @@ import sim  # noqa: E402
 
 import os  # noqa: E402
 import paths  # noqa: E402
+import store  # noqa: E402
 
 # Locally `data/gm2000.db` beside the code; on a host, whatever GM2000_DATA_DIR
 # or GM2000_DB points at. See backend/paths.py.
@@ -47,6 +48,23 @@ app.add_middleware(
     allow_origins=_origins,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _persist_writes(request, call_next):
+    """Push the save back to durable storage after anything that wrote.
+
+    On a free host the container's filesystem is temporary, so a committed
+    SQLite write is only as durable as the next restart. GET is skipped because
+    it cannot change anything; a failed request is skipped because there is
+    nothing worth saving. A no-op unless GM2000_STORE is set.
+    """
+    response = await call_next(request)
+    if (store.enabled() and request.method != "GET"
+            and request.url.path.startswith("/api/")
+            and response.status_code < 400):
+        store.persist(DB)
+    return response
 
 
 def conn() -> sqlite3.Connection:
@@ -78,6 +96,8 @@ def _startup() -> None:
     seeded = paths.seed_data_dir()
     if seeded:
         print(seeded, flush=True)
+    # Pull the durable save down before anything opens it. No-op on a real disk.
+    print(store.hydrate(DB, paths.BUNDLED_DB), flush=True)
     if not DB.exists():
         print(f"no database at {DB} — /api/* will return 503", flush=True)
         return
@@ -91,6 +111,17 @@ def _startup() -> None:
 
 
 # ---------------------------------------------------------------- meta
+
+@app.get("/api/store/status")
+def store_status() -> dict:
+    """Where the save actually lives, and whether the last sync worked.
+
+    First thing to check when a deployed save appears to reset itself.
+    """
+    return {**store.status(), "db": str(DB),
+            "db_exists": DB.exists(),
+            "db_bytes": DB.stat().st_size if DB.exists() else 0}
+
 
 @app.get("/api/health")
 def health() -> dict:

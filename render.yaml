@@ -1,39 +1,38 @@
-# Backend host for WWE GM 2000.
+# OPTIONAL fallback host. The primary deploy runs entirely on Vercel — frontend
+# plus the API as a Python function — see vercel.json and DEPLOY.md.
 #
-# Why not Vercel: this API is stateful. Every draft pick, contract, show and
-# title change writes to a SQLite file, and the portrait gallery is a folder of
-# images. Vercel's Python runtime is serverless — fresh container per request,
-# read-only filesystem — so that state would evaporate between clicks. Render
-# gives the service a real mounted disk, which is all the app needs. No rewrite.
+# This config is here in case you want the API somewhere that is not serverless
+# (no cold starts mid-game, no 60s function ceiling). It uses Render's FREE
+# plan, which means NO persistent disk: the filesystem is wiped on every restart
+# and the service sleeps after 15 minutes idle. That is survivable because the
+# save no longer lives on the container — GM2000_STORE keeps it in durable
+# storage and backend/store.py pulls it down at boot. See DEPLOY.md.
 #
-# NOTE ON PLAN: persistent disks require a PAID instance type on Render. A free
-# web service has an ephemeral filesystem, which would lose the save on every
-# restart and defeat the point. `starter` is the cheapest tier that has disks.
+# The earlier version of this file asked for a paid `starter` instance with a
+# mounted disk. That was the only way to keep a save before store.py existed.
 services:
   - type: web
     name: wwe-gm-2000-api
     runtime: python
-    plan: starter
+    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
-    disk:
-      name: gm2000-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.7"
-      # Moves the whole data tree (save + images + logos) onto the disk above.
-      # backend/paths.py copies the bundled roster there on first boot and never
-      # touches it again — after that the disk holds the live game.
+      # Free instances have no disk; /tmp is the writable scratch space and the
+      # store is what actually makes the save durable.
       - key: GM2000_DATA_DIR
-        value: /var/data
-      # Your Vercel URL, e.g. https://wwe-gm.vercel.app — comma-separated for
-      # more than one. Without it the browser blocks every API call as CORS.
+        value: /tmp/gm2000
+      - key: GM2000_STORE
+        value: blob
+      # From the Vercel Blob store — Storage tab, .env snippet.
+      - key: BLOB_READ_WRITE_TOKEN
+        sync: false
+      # Your Vercel URL. Not needed if the API is on Vercel too (same origin).
       - key: GM2000_CORS_ORIGINS
         sync: false
-      # Set in the Render dashboard. Never committed.
       - key: GROQ_API_KEY
         sync: false

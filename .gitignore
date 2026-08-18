@@ -44,3 +44,6 @@ node_modules/
 dist/
 .vercel/
 *.log
+
+# smoke test scratch
+.smoke/

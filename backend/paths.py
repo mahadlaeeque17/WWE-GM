@@ -58,5 +58,10 @@ def seed_data_dir() -> str | None:
         return None
     if not BUNDLED_DB.exists():
         return None
-    shutil.copy2(BUNDLED_DB, DB_PATH)
+    # copyfile + chmod, NOT copy2. copy2 carries the source's permission bits
+    # across, and the bundled save lives in a deployment bundle the host mounts
+    # read-only — so the copy would arrive read-only and SQLite could not write
+    # to it. That failure only shows up once deployed.
+    shutil.copyfile(BUNDLED_DB, DB_PATH)
+    DB_PATH.chmod(0o644)
     return f"seeded {DB_PATH} from {BUNDLED_DB}"

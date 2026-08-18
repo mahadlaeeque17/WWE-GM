@@ -1,130 +1,160 @@
 # Deploying WWE GM 2000
 
-The app has three moving parts:
+Everything runs on **Vercel's free Hobby plan** — the React frontend as static
+files and the FastAPI backend as a Python function. Nothing here costs money.
 
-| Part | What it is | State it holds |
+| Part | Where | State it holds |
 |---|---|---|
-| **Frontend** | Vite + React static bundle | none — pure static files |
-| **Backend** | FastAPI (`backend/`) | **writes constantly** to SQLite |
-| **Data** | `gm2000.db` + `images/` | the entire save + portraits |
+| **Frontend** | Vercel static | none |
+| **Backend** | Vercel Python function (`api/index.py`) | none — deliberately |
+| **The save** | Vercel Blob | everything |
 
-## The one thing to understand before Vercel
+## The problem free hosting creates, and how it is solved
 
-**Vercel cannot host the backend.** Vercel's Python runtime is *serverless*: each
-request runs in a fresh, throwaway container with a **read-only filesystem** (only
-`/tmp`, wiped between requests). Our whole game *is* a SQLite file that must
-persist every draft pick, contract, show and title change — plus a folder of
-images. On Vercel serverless that state evaporates between clicks.
+Free hosting is **stateless**. Vercel's Python runtime gives you a container
+whose filesystem is read-only apart from `/tmp` and is thrown away between
+requests; Render's free tier wipes its disk on every restart. This game *is* a
+SQLite file written on every draft pick, contract, show and title change — so on
+any free host that file, and the save with it, disappears.
 
-So: **frontend on Vercel, backend on a host with a persistent disk.** That is the
-shape below, and it needs no rewrite — the code already supports it.
+The paid answer is a mounted disk. The free answer is `backend/store.py`:
 
----
+- At boot the whole database is pulled down into a local file, and the app talks
+  to it as ordinary local SQLite — full speed, real transactions, **and not one
+  line of the app's SQL changes**.
+- After any request that wrote something, the file is pushed back up.
 
-## Deploy — frontend on Vercel, backend on Render
+The save is well under a megabyte and this is a single-player game, so moving
+the whole file per write is cheap and safe. (It would be the wrong design for a
+multi-user app, where two writers could overwrite each other.)
 
-### 1. Backend → Render
+The alternative — swapping SQLite for a hosted database — was rejected: it
+rewrites every query in `game.py`, `sim.py`, `rankings.py` and `main.py`, and
+the client for the SQLite-compatible option ships as a compiled extension with
+no wheel for the development machine's Python, so the port could not have been
+tested at all before deploying. `store.py` is ~150 lines and the whole
+wipe-and-recover cycle is covered by a test.
 
-The repo has a **`render.yaml`** blueprint. In the Render dashboard:
-*New → Blueprint*, point it at `mahadlaeeque17/WWE-GM`, and it reads the file.
-
-It provisions a web service from `backend/` with a **1 GB disk mounted at
-`/var/data`**, health-checked on `/api/health`.
-
-> **Plan note.** Persistent disks require a **paid instance type** on Render — a
-> free web service has an ephemeral filesystem and would lose the save on every
-> restart, which defeats the point. `render.yaml` therefore specifies `starter`.
-> Fly.io offers volumes more cheaply if that matters; the app is host-agnostic,
-> only the config file changes.
-
-Two env vars are marked `sync: false`, so Render will prompt for them:
-
-| Var | Value |
-|---|---|
-| `GM2000_CORS_ORIGINS` | your Vercel URL, e.g. `https://wwe-gm.vercel.app` |
-| `GROQ_API_KEY` | the key from your local `backend/.env` |
-
-Leave `GROQ_API_KEY` unset if you don't want the AI layer in production —
-everything else works without it, because the simulation is deterministic and
-never asks the AI to decide a match.
-
-### 2. Frontend → Vercel
-
-*New Project* → import `mahadlaeeque17/WWE-GM`. The repo's **`vercel.json`** sets
-the build (`cd frontend && npm install && npm run build`) and the output
-directory (`frontend/dist`), so there are no settings to change.
-
-Add one environment variable:
-
-| Var | Value |
-|---|---|
-| `VITE_API_BASE` | your Render URL, e.g. `https://wwe-gm-2000-api.onrender.com` |
-
-**This is baked in at build time, not read at runtime** — set it *before* the
-first build, or redeploy after adding it, or the bundle ships with an empty API
-base and every call 404s against Vercel itself.
-
-### 3. Close the loop
-
-The two services each need the other's URL, so one of them is always deployed
-first with a placeholder:
-
-1. Deploy Render, note its URL.
-2. Deploy Vercel with `VITE_API_BASE` = that URL.
-3. Go back to Render, set `GM2000_CORS_ORIGINS` = the Vercel URL.
-
-Skipping step 3 gives you a UI that loads and then fails every request with a
-CORS error in the console — the classic symptom, and it looks like the backend
-is down when it is not.
+Verified: boot an empty container, start a game, **delete the entire filesystem**,
+boot again — the save comes back intact, including the Power 25 issues. GETs
+never write, failed requests never write.
 
 ---
 
-## How the data directory works
+## Deploy
+
+### 1. Create the Blob store
+
+Vercel dashboard → **Storage** → **Create** → **Blob**. Free on Hobby. Connect it
+to the project; Vercel then injects `BLOB_READ_WRITE_TOKEN` automatically.
+
+### 2. Import the repo
+
+**New Project** → `mahadlaeeque17/WWE-GM`. `vercel.json` already sets the build,
+the output directory, the Python function and the routing, so there is nothing
+to configure.
+
+### 3. Set the environment variables
+
+| Var | Value | Why |
+|---|---|---|
+| `GM2000_STORE` | `blob` | **without this the save resets on every cold start** |
+| `GROQ_API_KEY` | your key | optional — only the AI commentary/promos need it |
+
+`GM2000_DATA_DIR` is set in code to `/tmp/gm2000` and needs no attention.
+
+`VITE_API_BASE` is **not needed** — the API is served from the same domain under
+`/api`, so the frontend calls it same-origin. That also means no CORS setup.
+
+### 4. Check it
+
+Open **`/api/store/status`** on the deployed URL. It is the first thing to look
+at if a save ever appears to reset itself:
+
+```json
+{ "mode": "blob", "enabled": true, "configured": true,
+  "hydrated": 0.3, "error": null, "db_bytes": 536576 }
+```
+
+`"configured": false` means the Blob store is not linked. `"mode": "disk"` means
+`GM2000_STORE` was never set, and the game is running on a filesystem that will
+be thrown away.
+
+---
+
+## Known limits of the free deploy
+
+Worth knowing before you rely on it:
+
+- **Portraits do not persist.** Images are files, and `data/images/` lives on the
+  throwaway filesystem. The app already degrades cleanly — it shows initials
+  where there is no photo — but the Drive sync has nowhere durable to put what it
+  downloads, so image endpoints are effectively local-only. Run the app locally
+  when you want to work with portraits.
+- **Cold starts.** The first request after an idle period pays for the container
+  starting plus one database download. Subsequent requests are warm.
+- **One writer.** Two browser tabs booking shows at the same moment can have the
+  later write overwrite the earlier one. Fine for one person playing.
+- **Function ceiling.** `vercel.json` sets `maxDuration: 60`. Simulating a show
+  is far quicker than that, but a very long loop would be cut off.
+
+If any of that becomes annoying, the app is unchanged by moving to a host with a
+real disk — set `GM2000_STORE=disk` and point `GM2000_DATA_DIR` at the mount.
+
+---
+
+## Running the API somewhere other than Vercel
+
+`render.yaml` is included as an optional fallback, on Render's **free** plan (no
+disk, sleeps when idle) using the same Blob store for durability. If you use it,
+the frontend then needs `VITE_API_BASE` set to the Render URL **before its first
+build** (Vite bakes it in at build time), and Render needs `GM2000_CORS_ORIGINS`
+set to the Vercel URL — otherwise the UI loads and every request dies as CORS,
+which looks exactly like the backend being down.
+
+---
+
+## How the paths work
 
 `backend/paths.py` resolves everything the app writes:
 
 ```
-GM2000_DATA_DIR=/var/data     # moves db + images + logos onto the mounted disk
-GM2000_DB=/path/to.db         # overrides just the database (used by the tests)
+GM2000_DATA_DIR=/tmp/gm2000    # where the db, images and logos live
+GM2000_DB=/path/to.db          # overrides just the database (used by the tests)
 ```
 
 Unset, both fall back to `data/` beside the code, so **local development is
-unchanged**.
+completely unchanged** — `store.MODE` is `disk` and none of the sync code runs.
 
-On a host, the disk starts **empty** — and the API refuses to serve without a
-database, so a naive first deploy comes up 503 and stays there. `seed_data_dir()`
-handles that: on startup it copies the bundled `data/gm2000.db` (the seeded
-270-wrestler roster) onto the disk **once**. If a save is already there it is left
-completely alone, because that file is now the live game and the bundled one is
-only a seed.
+`seed_data_dir()` copies the bundled `data/gm2000.db` (the seeded 270-wrestler
+roster) into that directory if it is empty, because the API refuses to serve
+without a database and a fresh container starts with nothing. It copies **once**
+and never touches an existing save. `store.hydrate()` then runs immediately
+after and, if durable storage already holds a save, that one wins — the bundled
+roster is only ever a starting point.
 
-Verified both ways locally against a fake mount: first boot logs
-`seeded /var/data/gm2000.db from …` and reports 270 wrestlers; a restart after
-starting a new game does *not* re-seed and the running save survives intact.
+## Environment variables, all of them
 
-## What the code already does for deployment
+| Var | Default | What it does |
+|---|---|---|
+| `GM2000_STORE` | `disk` | `disk` (file is already durable) · `blob` (Vercel Blob) · `dir` (another folder — used by the tests) |
+| `BLOB_READ_WRITE_TOKEN` | — | injected by Vercel when a Blob store is connected |
+| `GM2000_BLOB_KEY` | `gm2000.db` | the key the save is stored under |
+| `GM2000_REMOTE_DIR` | — | `dir` mode target |
+| `GM2000_DATA_DIR` | `data/` | where db + images + logos live |
+| `GM2000_DB` | — | overrides just the database file |
+| `GM2000_CORS_ORIGINS` | — | extra allowed origins; unnecessary when the API is same-origin |
+| `GROQ_API_KEY` | — | the AI layer. Everything else works without it |
 
-- `frontend/src/api.ts` reads **`VITE_API_BASE`** — empty in dev (Vite proxies
-  `/api` → `localhost:8010`), set to the backend origin in production. All API
-  calls *and* image URLs go through it.
-- `backend/main.py` reads **`GM2000_CORS_ORIGINS`** (comma-separated) and adds
-  them to the allow-list.
-- `backend/paths.py` reads **`GM2000_DATA_DIR`** / **`GM2000_DB`**.
-- `backend/requirements.txt` pins the Python deps.
-- The **Groq key stays server-side** — backend env only, never in the frontend
-  bundle. The browser only ever calls our own `/api/ai/*` endpoints.
+The **Groq key stays server-side** — backend env only, never in the frontend
+bundle. The browser only ever calls our own `/api/ai/*` endpoints.
 
-## If you'd rather run everything on Vercel
+## Testing the deploy story locally
 
-That means swapping the storage layer, and it is a real chunk of work rather
-than config:
+```bash
+python smoke_store.py
+```
 
-- **SQLite → Postgres** (Neon / Vercel Postgres). Every `sqlite3` call in
-  `main.py`, `game.py`, `sim.py` and `rankings.py` gets ported. Mechanical, but
-  it touches a lot — and the raw SQL uses a few SQLite-isms (`INSERT OR IGNORE`,
-  `ON CONFLICT DO UPDATE`, partial unique indexes) that need translating.
-- **`data/images/` → object storage** (Vercel Blob / S3), with the image
-  endpoints streaming from the bucket.
-
-Then the backend can run as Vercel Python functions. Say the word and I'll scope
-it separately.
+Boots the API against a throwaway directory, starts a game, **deletes the entire
+filesystem**, boots again and asserts the save came back — plus that GETs and
+failed requests never write. That is the whole free-hosting risk, covered.

@@ -3,5 +3,15 @@
   "buildCommand": "cd frontend && npm install && npm run build",
   "outputDirectory": "frontend/dist",
   "installCommand": "echo skip - the build installs inside frontend/",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "functions": {
+    "api/index.py": {
+      "runtime": "@vercel/python@4.3.0",
+      "maxDuration": 60,
+      "includeFiles": "{backend/**,harvester/**,data/gm2000.db}"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }
