@@ -247,77 +247,65 @@ def _is_blob_host(url: str) -> bool:
     return host.endswith("vercel-storage.com") or host.endswith("vercel.app")
 
 
-# Upload variants, tried in order until one is accepted.
+# Upload headers, taken from the official @vercel/blob client rather than
+# guessed. The relevant lines of its put() are:
 #
-# TWO axes, because the first fix was not enough.
+#     headers["x-vercel-blob-access"] = options.access
+#     headers["x-add-random-suffix"]  = addRandomSuffix ? "1" : "0"
+#     headers["x-allow-overwrite"]    = allowOverwrite  ? "1" : "0"
+#     headers["x-content-type"]       = contentType
 #
-# ACCESS. An upload declares public or private and defaults to public, which a
-# private store refuses:
+# The access header is `x-vercel-blob-access`, NOT `x-access`. Sending the wrong
+# name meant the server saw no access at all, defaulted to public, and refused
+# it against a private store — with a message that named the symptom ("cannot
+# use public access") and gave no hint that the header had simply been ignored.
+# Ten guessed combinations returned that one sentence; reading the client
+# answered it immediately, and should have been the first move.
 #
-#   400 "Cannot use public access on a private store."
-#
-# But adding `x-access: private` changed nothing — the identical error came back
-# for every variant, which means the server was not reading the header at all.
-#
-# API VERSION. That is the reason. Private stores are a recent Blob feature and
-# this client was pinned to version 7, which predates them: an old version does
-# not understand `x-access`, so it silently treats every upload as public and
-# then rejects it against a private store. Listing kept working throughout,
-# which is what made the version look innocent.
-#
-# So newer versions are tried first, each declaring private, before falling back
-# to older ones and to public for a store that was created public. The winning
-# combination is remembered and reported as `put_variant`; pin
-# GM2000_BLOB_API_VERSION to it and this list can collapse to one entry.
-_CONTENT = {"x-content-type": "application/octet-stream",
-            # Off deliberately: with a random suffix every write lands on a NEW
-            # url and orphans the previous save instead of replacing it.
-            "x-add-random-suffix": "0"}
-
-_PUT_VARIANTS = (
-    [(f"v{v}-private", v, {**_CONTENT, "x-access": "private"})
-     for v in ("12", "11", "10", "9", "8", "7")]
-    + [(f"v{v}-public", v, {**_CONTENT, "x-access": "public"})
-       for v in ("12", "11", "7")]
-    + [("v11-bare", "11", dict(_CONTENT))]
-)
+# x-allow-overwrite is required for us specifically: the save is written to the
+# same key over and over, and without it the second write is refused because a
+# blob already exists there. x-add-random-suffix stays "0" for the same reason —
+# a suffix would put every write on a new url and orphan the previous save.
+BLOB_ACCESS = os.environ.get("GM2000_BLOB_ACCESS", "private").strip().lower()
 
 _good_variant: str | None = None
 
 
-def _blob_put(data: bytes) -> None:
-    global _good_variant
-    variants = _PUT_VARIANTS
-    if _good_variant:
-        variants = ([v for v in _PUT_VARIANTS if v[0] == _good_variant]
-                    + [v for v in _PUT_VARIANTS if v[0] != _good_variant])
+def _put_headers(access: str) -> dict:
+    return {**_blob_headers(),
+            "x-vercel-blob-access": access,
+            "x-add-random-suffix": "0",
+            "x-allow-overwrite": "1",
+            "x-content-type": "application/octet-stream"}
 
-    failures = []
-    seen = set()
-    for name, version, extra in variants:
-        try:
-            r = httpx.put(f"{BLOB_API}/{BLOB_KEY}",
-                          headers={**_blob_headers(version), **extra},
-                          content=data, timeout=TIMEOUT)
-        except Exception as e:  # noqa: BLE001
-            failures.append(f"{name}: {type(e).__name__}: {e}")
-            continue
+
+def _blob_put(data: bytes) -> None:
+    """Upload the save, matching the store's access mode.
+
+    One request. The single retry exists because the store's access is chosen in
+    the dashboard and the app cannot see it: if the store turns out to be the
+    other kind, Vercel says so explicitly, so that one message — and nothing
+    else — is worth a second attempt with the opposite value.
+    """
+    global _good_variant
+    first = _good_variant or BLOB_ACCESS
+    other = "public" if first == "private" else "private"
+
+    for attempt, access in enumerate((first, other)):
+        r = httpx.put(f"{BLOB_API}/{BLOB_KEY}", headers=_put_headers(access),
+                      content=data, timeout=TIMEOUT)
         if r.status_code < 400:
-            _good_variant = name
+            _good_variant = access
             return
-        body = " ".join(r.text[:200].split())
-        # Collapse identical rejections — nine copies of one sentence buries
-        # the one response that differs, which is the informative one.
-        key = (r.status_code, body)
-        if key in seen:
+        body = " ".join(r.text[:300].split())
+        if attempt == 0 and "access" in body.lower():
             continue
-        seen.add(key)
-        failures.append(f"{name}: HTTP {r.status_code} {body or '(empty body)'}")
-    raise RuntimeError("upload rejected — " + " | ".join(failures))
+        raise RuntimeError(f"upload rejected (access={access}): "
+                           f"HTTP {r.status_code} {body or '(empty body)'}")
 
 
 def put_variant() -> str | None:
-    """Which header set the store accepted, once one has worked."""
+    """Which access mode the store accepted, once an upload has worked."""
     return _good_variant
 
 
