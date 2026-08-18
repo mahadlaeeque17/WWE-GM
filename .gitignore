@@ -1,0 +1,46 @@
+# ============================================================ secrets
+# Google OAuth — contains a refresh token for your Drive account
+backend/drive_token.json
+backend/drive_oauth_client.json
+backend/drive_service_account.json
+backend/drive_api_key.txt
+
+.env
+.env.local
+
+# ============================================================ scraped data
+# The cagematch harvest cache. NOT published — see harvester/NOTES.md:
+# "Single-operator hobbyist site ... dataset stays local and is not
+# republished." The game DB derived from it ships; the raw scrape does not.
+data/raw/
+
+# ============================================================ local art
+# Logo/belt art you dropped in yourself. data/logos/README.txt is explicit that
+# nothing here ships with the app — it is your slot for art you have the right
+# to use, so it stays out of a public repo.
+data/logos/*
+!data/logos/README.txt
+
+# Wrestler portraits, synced from Drive or dropped in the inbox
+data/images/*/
+!data/images/inbox/
+data/images/inbox/*
+!data/images/inbox/README.txt
+
+# ============================================================ save working copies
+# data/gm2000.db IS committed — it is the seeded roster and the app refuses to
+# boot without it. These are throwaway snapshots taken before roster batches and
+# smoke tests, and there is no reason to carry them.
+data/*.backup-*.db
+data/*.pre-batch*.db
+data/_smoke*.db
+data/*.db-wal
+data/*.db-shm
+
+# ============================================================ build output
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.vercel/
+*.log

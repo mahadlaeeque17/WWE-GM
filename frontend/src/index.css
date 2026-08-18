@@ -1,0 +1,147 @@
+/* Font import must come before the Tailwind import or the cascade drops it. */
+@import url('https://fonts.googleapis.com/css2?family=Anton&family=Barlow:wght@400;500;600;700;800&family=Barlow+Condensed:wght@500;600;700&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  /* Deeper, slightly blue-black — closer to an arena than a text editor. */
+  --color-canvas: #05070d;
+  --color-panel: #111623;
+  --color-raised: #1a2233;
+  --color-edge: #2a3446;
+  --color-edge-soft: #1d2536;
+
+  /* Punchier accents — vivid gold, hot red, electric blue. */
+  --color-gold: #ffc83d;
+  --color-gold-deep: #c8901a;
+  --color-raw: #ff2b4e;
+  --color-smackdown: #3d8dff;
+  --color-blood: #ff4d64;
+
+  --font-display: 'Anton', 'Arial Narrow', sans-serif;
+  --font-sans: 'Barlow', ui-sans-serif, system-ui, sans-serif;
+  --font-cond: 'Barlow Condensed', 'Barlow', sans-serif;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--color-canvas);
+  color: #dfe4ee;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Arena-light wash — bolder now, so the whole app feels lit rather than flat. */
+#root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 1000px 560px at 12% -8%, rgba(255, 43, 78, 0.16), transparent 62%),
+    radial-gradient(ellipse 1000px 560px at 88% -8%, rgba(61, 141, 255, 0.16), transparent 62%),
+    radial-gradient(ellipse 1200px 500px at 50% 108%, rgba(255, 200, 61, 0.10), transparent 60%);
+}
+#root > * { position: relative; z-index: 1; }
+
+.tnum { font-variant-numeric: tabular-nums; }
+
+.display {
+  font-family: var(--font-display);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+
+/* Big stat numerals: condensed so four columns of digits stay compact. */
+.stat {
+  font-family: var(--font-cond);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.label {
+  font-family: var(--font-cond);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+/* Metallic sheen for the wordmark and brand headers. */
+.sheen {
+  background: linear-gradient(178deg, #fff8e1 0%, var(--color-gold) 42%, #8a6410 78%, var(--color-gold) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.card {
+  background: linear-gradient(180deg, var(--color-raised), var(--color-panel));
+  border: 1px solid var(--color-edge);
+  border-radius: 0.5rem;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.28);
+}
+
+.row-hover { transition: background-color 120ms ease, box-shadow 120ms ease; }
+.row-hover:hover { background: rgba(255, 255, 255, 0.035); }
+
+/* A little game-feel: cards and banners rise in when they mount. */
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+.pop-in { animation: pop-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Champion banner shimmer — a slow gold sweep behind the belt. */
+@keyframes champ-sheen {
+  0%   { background-position: -120% 0; }
+  100% { background-position: 220% 0; }
+}
+.champ-glow::after {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(105deg, transparent 40%, rgba(232,185,63,0.10) 50%, transparent 60%);
+  background-size: 220% 100%;
+  animation: champ-sheen 6s linear infinite;
+}
+
+/* Portraits are ~2:3. `contain` guarantees nothing is ever cropped off —
+   a face sliced in half is worse than a little letterboxing. */
+.portrait {
+  object-fit: contain;
+  background:
+    radial-gradient(ellipse at 50% 35%, rgba(255, 255, 255, 0.07), transparent 70%),
+    var(--color-canvas);
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+/* Trading-card lift: a row's portrait pops slightly on hover. */
+tr:hover .portrait { transform: scale(1.06); box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+
+.scrim {
+  background: linear-gradient(to top, var(--color-panel) 4%, rgba(16, 20, 29, 0.7) 34%, transparent 72%);
+}
+
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--color-edge);
+  outline: none;
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px; height: 15px;
+  border-radius: 50%;
+  background: var(--color-gold);
+  border: 2px solid #0d1017;
+  box-shadow: 0 0 0 1px var(--color-gold-deep), 0 0 9px rgba(232, 185, 63, 0.45);
+  cursor: pointer;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--color-canvas); }
+::-webkit-scrollbar-thumb { background: var(--color-edge); border-radius: 999px; border: 2px solid var(--color-canvas); }
+::-webkit-scrollbar-thumb:hover { background: #33405a; }

@@ -1,0 +1,9 @@
+fastapi==0.135.1
+uvicorn==0.42.0
+pydantic==2.12.5
+httpx==0.28.1
+python-dotenv==1.0.1
+# Google Drive image sync (optional at runtime)
+google-api-python-client
+google-auth
+google-auth-oauthlib
