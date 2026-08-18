@@ -67,6 +67,13 @@ automatically. Without that connection the API still boots but reports
 the output directory, the Python function and the routing, so there is nothing
 to configure.
 
+> **Do not add a `requirements.txt` at the repo root.** Vercel reads one as a
+> signal that the whole project is a *backend framework project*, routes every
+> request through a backend adapter, and stops serving the static build — which
+> presents as the site crashing rather than as a configuration mistake. The
+> function's dependencies belong in `api/requirements.txt`; `vercel.json` also
+> pins `"framework": null` so detection cannot drift back.
+
 ### 3. Set the environment variables
 
 | Var | Value | Why |

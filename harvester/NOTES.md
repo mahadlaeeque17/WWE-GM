@@ -162,3 +162,26 @@ Direction of travel picks the sentence; the facts fill it in.
 On a week where nobody wrestled, all 25 entries fall into the same "did not
 work" branch and the board reads as one sentence repeated. Variants are keyed on
 rank, not randomised, so re-opening an old issue never changes what it says.
+
+
+## Deploy trap: a root requirements.txt silently changes what Vercel builds
+
+A `requirements.txt` in the REPO ROOT makes Vercel classify the project as a
+"backend framework project" — the phrase appears verbatim in its own build log:
+
+    WARNING! Internal rewrites in backend framework projects now route requests
+    using the rewritten destination path.
+
+It then routes everything through a backend adapter and stops serving the static
+build. It does not look like a configuration problem, it looks like the app is
+broken: `/` returned FUNCTION_INVOCATION_FAILED instead of index.html, and — the
+detail that gave it away — so did a diagnostic function importing nothing but
+the standard library. No amount of fixing the application code could have helped.
+
+Keep dependency manifests out of the repo root: `api/requirements.txt` for the
+function, `backend/requirements.txt` for running the API locally. `vercel.json`
+also sets `"framework": null` so detection cannot drift back.
+
+The general lesson, which cost several deploys: when a *stdlib-only* probe fails
+the same way the real app does, stop debugging the app. The platform is not
+running what you think it is running.
