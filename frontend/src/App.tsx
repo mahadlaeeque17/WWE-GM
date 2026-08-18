@@ -272,8 +272,8 @@ export default function App() {
             NOT SAVING
           </span>
           <span className="text-slate-200">
-            Nothing you do here is being kept — this host wipes its filesystem, and durable
-            storage is not connected. {store.durable_detail}
+            Nothing you do here is being kept — this host throws its filesystem away.{' '}
+            <span className="text-slate-400">{store.durable_detail}</span>
           </span>
           <span className="ml-auto label text-[10px] text-slate-500 shrink-0">
             mode {store.mode}

@@ -105,8 +105,12 @@ def durable() -> tuple[bool, str]:
     if enabled():
         return ok, detail
     if EPHEMERAL_HOST:
-        return False, ("this host wipes its filesystem — link a Blob store so "
-                       "BLOB_READ_WRITE_TOKEN is available, or set GM2000_STORE")
+        # Phrased as the next action, not as a restatement of the problem — the
+        # banner already says what is wrong, and adding the token WITHOUT
+        # redeploying is the step everyone misses, because env vars only reach
+        # a function on its next build.
+        return False, ("Link a Blob store to this project, then redeploy — "
+                       "environment variables only reach the app on a new build.")
     return True, detail
 
 
