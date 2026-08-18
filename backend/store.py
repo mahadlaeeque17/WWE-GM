@@ -248,28 +248,27 @@ def _is_blob_host(url: str) -> bool:
 
 # Upload header variants, tried in order until one is accepted.
 #
-# The first real upload was rejected with a bare 400 while the LIST call on the
-# same token and API version succeeded — so auth and version are fine and the
-# fault is a PUT-specific header. Vercel documents a minimum for
-# cache-control-max-age and parses the random-suffix flag strictly, and either
-# would produce exactly this. With no way to test against real Blob storage from
-# a development machine, guessing one header per redeploy would cost a round
-# trip each time, so the sensible variants are tried in one pass: smallest
-# header set first, on the principle that a header you do not send cannot be
-# rejected.
+# The axis that matters is ACCESS. An upload declares whether the blob is public
+# or private, it defaults to public, and a private store rejects that outright:
 #
-# The winner is remembered for the life of the container and reported by
-# /api/store/status. Once it is known, this list should collapse to that one
-# entry — it is scaffolding, not a permanent design.
+#   400 {"code":"bad_request","message":"Cannot use public access on a
+#        private store. The store is configured with private access."}
+#
+# which is what the very first upload hit. A save file should be private, so
+# that is tried first — but a store created as public would refuse `private`
+# with the mirror-image complaint, so both are attempted and the app works with
+# either kind of store rather than dictating which one to create.
+#
+# `x-add-random-suffix: 0` matters independently: with a suffix, every write
+# would land on a NEW url and orphan the previous save instead of replacing it.
+# The two spellings are both tried because the flag is parsed strictly.
+_CONTENT = {"x-content-type": "application/octet-stream"}
+
 _PUT_VARIANTS = [
-    ("minimal", {"x-content-type": "application/octet-stream"}),
-    ("suffix-0", {"x-content-type": "application/octet-stream",
-                  "x-add-random-suffix": "0"}),
-    ("suffix-false", {"x-content-type": "application/octet-stream",
-                      "x-add-random-suffix": "false"}),
-    ("suffix-0+cache-60", {"x-content-type": "application/octet-stream",
-                           "x-add-random-suffix": "0",
-                           "x-cache-control-max-age": "60"}),
+    ("private", {**_CONTENT, "x-access": "private", "x-add-random-suffix": "0"}),
+    ("private-false", {**_CONTENT, "x-access": "private", "x-add-random-suffix": "false"}),
+    ("private-nosuffix", {**_CONTENT, "x-access": "private"}),
+    ("public", {**_CONTENT, "x-access": "public", "x-add-random-suffix": "0"}),
 ]
 
 _good_variant: str | None = None
