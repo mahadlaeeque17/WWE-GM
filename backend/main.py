@@ -67,13 +67,18 @@ async def _persist_writes(request, call_next):
     return response
 
 
-def conn() -> sqlite3.Connection:
-    if not DB.exists():
-        raise HTTPException(503, f"database missing at {DB} — run harvester/normalize.py")
+def _raw_conn() -> sqlite3.Connection:
     c = sqlite3.connect(DB)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys = ON")
     return c
+
+
+def conn() -> sqlite3.Connection:
+    ensure_ready()
+    if not DB.exists():
+        raise HTTPException(503, f"database missing at {DB} — run harvester/normalize.py")
+    return _raw_conn()
 
 
 def q(sql: str, args: tuple = ()) -> list[dict[str, Any]]:
@@ -88,26 +93,48 @@ def current_state(c: sqlite3.Connection) -> sqlite3.Row | None:
     return c.execute("SELECT * FROM game_state WHERE id=1").fetchone()
 
 
+_READY = False
+_READY_LOG: list[str] = []
+
+
+def ensure_ready() -> None:
+    """Put the save in place and bring the schema up to date. Runs ONCE.
+
+    Deliberately callable from two places. On a normal server the startup event
+    fires it; on a serverless host the ASGI lifespan may never run at all, and
+    relying on it would leave the container with no database and every endpoint
+    answering 503. `conn()` calls this too, so the first request repairs it.
+    """
+    global _READY
+    if _READY:
+        return
+    _READY = True                      # set first: a failure must not retry forever
+    try:
+        seeded = paths.seed_data_dir()
+        if seeded:
+            _READY_LOG.append(seeded)
+        # Pull the durable save down before anything opens it. No-op on a real disk.
+        _READY_LOG.append(store.hydrate(DB, paths.BUNDLED_DB))
+        if not DB.exists():
+            _READY_LOG.append(f"no database at {DB} — /api/* will return 503")
+            return
+        c = _raw_conn()
+        try:
+            game.ensure_schema(c)
+            rankings.ensure_schema(c)
+            game.ensure_titles(c)
+        finally:
+            c.close()
+        _READY_LOG.append("schema ready")
+    except Exception as e:  # noqa: BLE001
+        _READY_LOG.append(f"startup failed: {type(e).__name__}: {e}")
+    for line in _READY_LOG:
+        print(line, flush=True)
+
+
 @app.on_event("startup")
 def _startup() -> None:
-    """Create the newer tables (feuds/news/proposals/awards) for existing saves."""
-    # On a mounted disk the first boot starts empty — lay the bundled save down
-    # before anything tries to open it, or the service comes up 503 forever.
-    seeded = paths.seed_data_dir()
-    if seeded:
-        print(seeded, flush=True)
-    # Pull the durable save down before anything opens it. No-op on a real disk.
-    print(store.hydrate(DB, paths.BUNDLED_DB), flush=True)
-    if not DB.exists():
-        print(f"no database at {DB} — /api/* will return 503", flush=True)
-        return
-    c = conn()
-    try:
-        game.ensure_schema(c)
-        rankings.ensure_schema(c)
-        game.ensure_titles(c)
-    finally:
-        c.close()
+    ensure_ready()
 
 
 # ---------------------------------------------------------------- meta
@@ -118,15 +145,24 @@ def store_status() -> dict:
 
     First thing to check when a deployed save appears to reset itself.
     """
+    ensure_ready()
     return {**store.status(), "db": str(DB),
             "db_exists": DB.exists(),
-            "db_bytes": DB.stat().st_size if DB.exists() else 0}
+            "db_bytes": DB.stat().st_size if DB.exists() else 0,
+            "startup": _READY_LOG,
+            "data_dir": str(paths.DATA_DIR),
+            "bundled_db_exists": paths.BUNDLED_DB.exists()}
 
 
 @app.get("/api/health")
 def health() -> dict:
+    # Before the existence check, not after. This endpoint short-circuits on a
+    # missing file, so on a host that never runs lifespan startup it would
+    # report "database missing" forever — having never given the lazy init a
+    # chance to put the database there.
+    ensure_ready()
     if not DB.exists():
-        return {"ok": False, "reason": "database missing"}
+        return {"ok": False, "reason": "database missing", "startup": _READY_LOG}
     c = conn()
     try:
         st = current_state(c)
