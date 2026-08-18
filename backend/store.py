@@ -171,8 +171,9 @@ def _dir_put(data: bytes) -> None:
 
 # --------------------------------------------------------------- blob backend
 
-def _blob_headers() -> dict:
-    return {"authorization": f"Bearer {BLOB_TOKEN}", "x-api-version": BLOB_API_VERSION}
+def _blob_headers(version: str | None = None) -> dict:
+    return {"authorization": f"Bearer {BLOB_TOKEN}",
+            "x-api-version": version or BLOB_API_VERSION}
 
 
 def _blob_raise(r: httpx.Response, what: str) -> None:
@@ -246,30 +247,40 @@ def _is_blob_host(url: str) -> bool:
     return host.endswith("vercel-storage.com") or host.endswith("vercel.app")
 
 
-# Upload header variants, tried in order until one is accepted.
+# Upload variants, tried in order until one is accepted.
 #
-# The axis that matters is ACCESS. An upload declares whether the blob is public
-# or private, it defaults to public, and a private store rejects that outright:
+# TWO axes, because the first fix was not enough.
 #
-#   400 {"code":"bad_request","message":"Cannot use public access on a
-#        private store. The store is configured with private access."}
+# ACCESS. An upload declares public or private and defaults to public, which a
+# private store refuses:
 #
-# which is what the very first upload hit. A save file should be private, so
-# that is tried first — but a store created as public would refuse `private`
-# with the mirror-image complaint, so both are attempted and the app works with
-# either kind of store rather than dictating which one to create.
+#   400 "Cannot use public access on a private store."
 #
-# `x-add-random-suffix: 0` matters independently: with a suffix, every write
-# would land on a NEW url and orphan the previous save instead of replacing it.
-# The two spellings are both tried because the flag is parsed strictly.
-_CONTENT = {"x-content-type": "application/octet-stream"}
+# But adding `x-access: private` changed nothing — the identical error came back
+# for every variant, which means the server was not reading the header at all.
+#
+# API VERSION. That is the reason. Private stores are a recent Blob feature and
+# this client was pinned to version 7, which predates them: an old version does
+# not understand `x-access`, so it silently treats every upload as public and
+# then rejects it against a private store. Listing kept working throughout,
+# which is what made the version look innocent.
+#
+# So newer versions are tried first, each declaring private, before falling back
+# to older ones and to public for a store that was created public. The winning
+# combination is remembered and reported as `put_variant`; pin
+# GM2000_BLOB_API_VERSION to it and this list can collapse to one entry.
+_CONTENT = {"x-content-type": "application/octet-stream",
+            # Off deliberately: with a random suffix every write lands on a NEW
+            # url and orphans the previous save instead of replacing it.
+            "x-add-random-suffix": "0"}
 
-_PUT_VARIANTS = [
-    ("private", {**_CONTENT, "x-access": "private", "x-add-random-suffix": "0"}),
-    ("private-false", {**_CONTENT, "x-access": "private", "x-add-random-suffix": "false"}),
-    ("private-nosuffix", {**_CONTENT, "x-access": "private"}),
-    ("public", {**_CONTENT, "x-access": "public", "x-add-random-suffix": "0"}),
-]
+_PUT_VARIANTS = (
+    [(f"v{v}-private", v, {**_CONTENT, "x-access": "private"})
+     for v in ("12", "11", "10", "9", "8", "7")]
+    + [(f"v{v}-public", v, {**_CONTENT, "x-access": "public"})
+       for v in ("12", "11", "7")]
+    + [("v11-bare", "11", dict(_CONTENT))]
+)
 
 _good_variant: str | None = None
 
@@ -282,10 +293,11 @@ def _blob_put(data: bytes) -> None:
                     + [v for v in _PUT_VARIANTS if v[0] != _good_variant])
 
     failures = []
-    for name, extra in variants:
+    seen = set()
+    for name, version, extra in variants:
         try:
             r = httpx.put(f"{BLOB_API}/{BLOB_KEY}",
-                          headers={**_blob_headers(), **extra},
+                          headers={**_blob_headers(version), **extra},
                           content=data, timeout=TIMEOUT)
         except Exception as e:  # noqa: BLE001
             failures.append(f"{name}: {type(e).__name__}: {e}")
@@ -293,7 +305,13 @@ def _blob_put(data: bytes) -> None:
         if r.status_code < 400:
             _good_variant = name
             return
-        body = " ".join(r.text[:300].split())
+        body = " ".join(r.text[:200].split())
+        # Collapse identical rejections — nine copies of one sentence buries
+        # the one response that differs, which is the informative one.
+        key = (r.status_code, body)
+        if key in seen:
+            continue
+        seen.add(key)
         failures.append(f"{name}: HTTP {r.status_code} {body or '(empty body)'}")
     raise RuntimeError("upload rejected — " + " | ".join(failures))
 
