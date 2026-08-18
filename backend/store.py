@@ -128,6 +128,7 @@ def status() -> dict:
         "durable": dur,
         "durable_detail": dur_detail,
         "ephemeral_host": EPHEMERAL_HOST,
+        "put_variant": put_variant(),
         **_last,
     }
 
@@ -245,24 +246,62 @@ def _is_blob_host(url: str) -> bool:
     return host.endswith("vercel-storage.com") or host.endswith("vercel.app")
 
 
+# Upload header variants, tried in order until one is accepted.
+#
+# The first real upload was rejected with a bare 400 while the LIST call on the
+# same token and API version succeeded — so auth and version are fine and the
+# fault is a PUT-specific header. Vercel documents a minimum for
+# cache-control-max-age and parses the random-suffix flag strictly, and either
+# would produce exactly this. With no way to test against real Blob storage from
+# a development machine, guessing one header per redeploy would cost a round
+# trip each time, so the sensible variants are tried in one pass: smallest
+# header set first, on the principle that a header you do not send cannot be
+# rejected.
+#
+# The winner is remembered for the life of the container and reported by
+# /api/store/status. Once it is known, this list should collapse to that one
+# entry — it is scaffolding, not a permanent design.
+_PUT_VARIANTS = [
+    ("minimal", {"x-content-type": "application/octet-stream"}),
+    ("suffix-0", {"x-content-type": "application/octet-stream",
+                  "x-add-random-suffix": "0"}),
+    ("suffix-false", {"x-content-type": "application/octet-stream",
+                      "x-add-random-suffix": "false"}),
+    ("suffix-0+cache-60", {"x-content-type": "application/octet-stream",
+                           "x-add-random-suffix": "0",
+                           "x-cache-control-max-age": "60"}),
+]
+
+_good_variant: str | None = None
+
+
 def _blob_put(data: bytes) -> None:
-    r = httpx.put(
-        f"{BLOB_API}/{BLOB_KEY}",
-        headers={
-            **_blob_headers(),
-            "x-content-type": "application/octet-stream",
-            # Same key every time, and never cached — this is the live save, not
-            # an asset. With a random suffix each write would orphan the last.
-            # "false", not "0". This flag is parsed as a boolean string, and a
-            # value it does not recognise is rejected as a bad request rather
-            # than ignored — which is one candidate for the 400 seen on the
-            # first real upload.
-            "x-add-random-suffix": "false",
-            "x-cache-control-max-age": "0",
-        },
-        content=data, timeout=TIMEOUT,
-    )
-    _blob_raise(r, "upload")
+    global _good_variant
+    variants = _PUT_VARIANTS
+    if _good_variant:
+        variants = ([v for v in _PUT_VARIANTS if v[0] == _good_variant]
+                    + [v for v in _PUT_VARIANTS if v[0] != _good_variant])
+
+    failures = []
+    for name, extra in variants:
+        try:
+            r = httpx.put(f"{BLOB_API}/{BLOB_KEY}",
+                          headers={**_blob_headers(), **extra},
+                          content=data, timeout=TIMEOUT)
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"{name}: {type(e).__name__}: {e}")
+            continue
+        if r.status_code < 400:
+            _good_variant = name
+            return
+        body = " ".join(r.text[:300].split())
+        failures.append(f"{name}: HTTP {r.status_code} {body or '(empty body)'}")
+    raise RuntimeError("upload rejected — " + " | ".join(failures))
+
+
+def put_variant() -> str | None:
+    """Which header set the store accepted, once one has worked."""
+    return _good_variant
 
 
 # ---------------------------------------------------------------- lifecycle
