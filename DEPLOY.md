@@ -67,12 +67,18 @@ automatically. Without that connection the API still boots but reports
 the output directory, the Python function and the routing, so there is nothing
 to configure.
 
-> **Do not add a `requirements.txt` at the repo root.** Vercel reads one as a
-> signal that the whole project is a *backend framework project*, routes every
-> request through a backend adapter, and stops serving the static build — which
-> presents as the site crashing rather than as a configuration mistake. The
-> function's dependencies belong in `api/requirements.txt`; `vercel.json` also
-> pins `"framework": null` so detection cannot drift back.
+> **Set Framework Preset to `Other`.** This is the one setting that cannot be
+> fixed from the repo. Vercel decides it when you first import, stores it in
+> project settings, and if it guesses "backend framework project" it routes
+> every request — including static assets like `/favicon.svg` — into the Python
+> function, which presents as the site being broken rather than as a
+> misconfiguration.
+>
+> And **leave `requirements.txt` at the repo root.** It looks like the cause of
+> that misdetection, but deleting it breaks the build outright: Vercel only
+> enables its Python runtime when it finds a manifest there, and without one
+> `api/index.py` is not a function at all. The preset, not the manifest, is the
+> thing to change.
 
 ### 3. Set the environment variables
 

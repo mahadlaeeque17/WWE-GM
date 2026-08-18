@@ -164,24 +164,42 @@ work" branch and the board reads as one sentence repeated. Variants are keyed on
 rank, not randomised, so re-opening an old issue never changes what it says.
 
 
-## Deploy trap: a root requirements.txt silently changes what Vercel builds
+## Deploy trap: root requirements.txt is REQUIRED, and also changes detection
 
-A `requirements.txt` in the REPO ROOT makes Vercel classify the project as a
-"backend framework project" — the phrase appears verbatim in its own build log:
+Two facts that pull in opposite directions, which cost several failed deploys:
 
-    WARNING! Internal rewrites in backend framework projects now route requests
-    using the rewritten destination path.
+1. **Vercel only enables its Python runtime when a dependency manifest sits at
+   the REPO ROOT.** Without one, `api/*.py` is not a Serverless Function at all
+   and the build dies in about a second:
 
-It then routes everything through a backend adapter and stops serving the static
-build. It does not look like a configuration problem, it looks like the app is
-broken: `/` returned FUNCTION_INVOCATION_FAILED instead of index.html, and — the
-detail that gave it away — so did a diagnostic function importing nothing but
-the standard library. No amount of fixing the application code could have helped.
+       Error: The pattern "api/index.py" defined in `functions` doesn't match
+       any Serverless Functions inside the `api` directory.
 
-Keep dependency manifests out of the repo root: `api/requirements.txt` for the
-function, `backend/requirements.txt` for running the API locally. `vercel.json`
-also sets `"framework": null` so detection cannot drift back.
+   Putting the manifest in `api/` instead does NOT satisfy this.
 
-The general lesson, which cost several deploys: when a *stdlib-only* probe fails
-the same way the real app does, stop debugging the app. The platform is not
-running what you think it is running.
+2. **That same root manifest makes Vercel classify the project as a "backend
+   framework project"** — the phrase is in its own build log — after which it
+   routes every request through a backend adapter and stops serving the static
+   build. Static assets like `/favicon.svg` come back as
+   FUNCTION_INVOCATION_FAILED, which looks nothing like a configuration problem.
+
+The resolution is NOT to delete the manifest. It is to keep it at the root and
+turn the classification off where it actually lives: the project's **Framework
+Preset → Other** in the dashboard, plus `"framework": null` in `vercel.json`.
+The preset is decided when the repo is first imported and is stored in project
+settings, so no commit can change it — if the repo was imported while the
+detection was wrong, that setting stays wrong until someone flips it by hand.
+
+### Two debugging lessons, both learned the slow way
+
+**A stdlib-only probe separates "my code is wrong" from "the host is running
+something else."** `api/diag.py` imports nothing but the standard library. When
+it failed exactly like the real app, that ruled out every application-level
+cause in one step.
+
+**Check WHICH commit is deployed before believing anything you test.** Three
+consecutive fixes appeared to do nothing because every one of them had failed to
+build, and Vercel keeps serving the last good deployment when a build fails. The
+dashboard marks it "Ready Stale" — easy to miss. The deployment list, showing
+Error against each commit, was the fastest route to the truth and should have
+been the first thing consulted, not the last.

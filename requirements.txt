@@ -1,0 +1,23 @@
+# Dependencies for the Vercel Python function (api/index.py).
+#
+# THIS FILE MUST STAY AT THE REPO ROOT. Vercel only enables its Python runtime
+# when it finds a dependency manifest here — without it, api/*.py is not treated
+# as a Serverless Function at all and the build dies immediately with:
+#
+#   Error: The pattern "api/index.py" defined in `functions` doesn't match any
+#   Serverless Functions inside the `api` directory.
+#
+# Moving it to api/ to avoid Vercel classifying the repo as a "backend framework
+# project" was the wrong fix for that problem — it traded a routing bug for a
+# build failure. The classification is controlled by the project's Framework
+# Preset (set it to "Other") and by "framework": null in vercel.json, NOT by
+# hiding this file.
+#
+# Deliberately NOT backend/requirements.txt. The Google Drive image sync pulls
+# in the whole google-api-python-client stack, which the deployed function never
+# uses — images are local-only in the free deploy — and it is a big install.
+# Run the backend locally from backend/requirements.txt, which has the full set.
+fastapi==0.135.1
+pydantic==2.12.5
+httpx==0.28.1
+python-dotenv==1.0.1
