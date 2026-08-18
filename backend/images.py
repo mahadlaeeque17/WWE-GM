@@ -28,15 +28,20 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-IMAGES_ROOT = Path(__file__).resolve().parent.parent / "data" / "images"
-INBOX = IMAGES_ROOT / "inbox"
+import paths
+
+# Resolved in paths.py so GM2000_DATA_DIR can move the whole tree onto a
+# mounted disk in a deployment — a container's own filesystem does not survive
+# a restart, and these are files the app writes.
+IMAGES_ROOT = paths.IMAGES_ROOT
+INBOX = paths.INBOX
 VALID_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 # Optional user-supplied logo/belt art. Drop files here named by KEY (e.g.
 # raw.png, world.svg, wrestlemania.png) to override the built-in SVG emblems.
 # The app never ships or downloads copyrighted brand art — this is a slot for
 # you to add your own if you want it.
-LOGOS_ROOT = Path(__file__).resolve().parent.parent / "data" / "logos"
+LOGOS_ROOT = paths.LOGOS_ROOT
 LOGO_EXT = [".svg", ".png", ".webp", ".jpg", ".jpeg", ".gif"]
 
 

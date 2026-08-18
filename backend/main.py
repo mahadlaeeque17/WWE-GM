@@ -30,11 +30,11 @@ import rankings  # noqa: E402
 import sim  # noqa: E402
 
 import os  # noqa: E402
+import paths  # noqa: E402
 
-# Normally the save beside the code. GM2000_DB points the API at another
-# file — used to exercise a populated save without touching the real one.
-_db_override = os.environ.get("GM2000_DB")
-DB = Path(_db_override) if _db_override else ROOT / "data" / "gm2000.db"
+# Locally `data/gm2000.db` beside the code; on a host, whatever GM2000_DATA_DIR
+# or GM2000_DB points at. See backend/paths.py.
+DB = paths.DB_PATH
 
 app = FastAPI(title="WWE GM 2000", version="0.5.0")
 # Local dev origins by default; in production add the deployed frontend origin
@@ -73,7 +73,13 @@ def current_state(c: sqlite3.Connection) -> sqlite3.Row | None:
 @app.on_event("startup")
 def _startup() -> None:
     """Create the newer tables (feuds/news/proposals/awards) for existing saves."""
+    # On a mounted disk the first boot starts empty — lay the bundled save down
+    # before anything tries to open it, or the service comes up 503 forever.
+    seeded = paths.seed_data_dir()
+    if seeded:
+        print(seeded, flush=True)
     if not DB.exists():
+        print(f"no database at {DB} — /api/* will return 503", flush=True)
         return
     c = conn()
     try:

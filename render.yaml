@@ -1,0 +1,39 @@
+# Backend host for WWE GM 2000.
+#
+# Why not Vercel: this API is stateful. Every draft pick, contract, show and
+# title change writes to a SQLite file, and the portrait gallery is a folder of
+# images. Vercel's Python runtime is serverless — fresh container per request,
+# read-only filesystem — so that state would evaporate between clicks. Render
+# gives the service a real mounted disk, which is all the app needs. No rewrite.
+#
+# NOTE ON PLAN: persistent disks require a PAID instance type on Render. A free
+# web service has an ephemeral filesystem, which would lose the save on every
+# restart and defeat the point. `starter` is the cheapest tier that has disks.
+services:
+  - type: web
+    name: wwe-gm-2000-api
+    runtime: python
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    disk:
+      name: gm2000-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      # Moves the whole data tree (save + images + logos) onto the disk above.
+      # backend/paths.py copies the bundled roster there on first boot and never
+      # touches it again — after that the disk holds the live game.
+      - key: GM2000_DATA_DIR
+        value: /var/data
+      # Your Vercel URL, e.g. https://wwe-gm.vercel.app — comma-separated for
+      # more than one. Without it the browser blocks every API call as CORS.
+      - key: GM2000_CORS_ORIGINS
+        sync: false
+      # Set in the Render dashboard. Never committed.
+      - key: GROQ_API_KEY
+        sync: false
