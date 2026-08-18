@@ -1,0 +1,9 @@
+{
+  "name": "wwe-gm-2000",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Root manifest so Vercel has a conventional install step. The app itself lives in frontend/ and backend/.",
+  "scripts": {
+    "build": "cd frontend && npm install && npm run build"
+  }
+}
