@@ -164,42 +164,60 @@ work" branch and the board reads as one sentence repeated. Variants are keyed on
 rank, not randomised, so re-opening an old issue never changes what it says.
 
 
-## Deploy trap: root requirements.txt is REQUIRED, and also changes detection
+## Deploying to Vercel: two separate faults that looked like one
 
-Two facts that pull in opposite directions, which cost several failed deploys:
+Days of FUNCTION_INVOCATION_FAILED came from two unrelated problems happening at
+once. Neither is guessable from the error page; both are obvious once the build
+is reproduced locally.
 
-1. **Vercel only enables its Python runtime when a dependency manifest sits at
-   the REPO ROOT.** Without one, `api/*.py` is not a Serverless Function at all
-   and the build dies in about a second:
+### 1. `app` must be bound at MODULE level or the file is not a Function
 
-       Error: The pattern "api/index.py" defined in `functions` doesn't match
-       any Serverless Functions inside the `api` directory.
+Vercel decides a `.py` file under `api/` is a Serverless Function by finding a
+top-level `app` or `handler`. Put the binding inside a `try:`/`except:` — as a
+perfectly reasonable way to catch import errors — and the file silently stops
+being a function. The build then fails with:
 
-   Putting the manifest in `api/` instead does NOT satisfy this.
+    The pattern "api/index.py" defined in `functions` doesn't match any
+    Serverless Functions inside the `api` directory.
 
-2. **That same root manifest makes Vercel classify the project as a "backend
-   framework project"** — the phrase is in its own build log — after which it
-   routes every request through a backend adapter and stops serving the static
-   build. Static assets like `/favicon.svg` come back as
-   FUNCTION_INVOCATION_FAILED, which looks nothing like a configuration problem.
+which reads like a path typo and is nothing of the sort. Do the fallible work in
+a helper and end the module with a plain `app = _build()`.
 
-The resolution is NOT to delete the manifest. It is to keep it at the root and
-turn the classification off where it actually lives: the project's **Framework
-Preset → Other** in the dashboard, plus `"framework": null` in `vercel.json`.
-The preset is decided when the repo is first imported and is stored in project
-settings, so no commit can change it — if the repo was imported while the
-detection was wrong, that setting stays wrong until someone flips it by hand.
+Proof, and the technique worth repeating: **run `vercel build` locally.** It
+needs no login once `.vercel/project.json` exists with any ids, and it turns a
+five-minute deploy round trip into a five-second one. Building with the
+`functions` block removed showed only `diag.func` being produced — `diag.py` has
+a top-level `class handler`, `index.py` had nothing at top level — which located
+the fault immediately after several wrong theories.
 
-### Two debugging lessons, both learned the slow way
+### 2. A root dependency manifest changes how the whole project is classified
 
-**A stdlib-only probe separates "my code is wrong" from "the host is running
+`requirements.txt` at the repo root is REQUIRED (Vercel enables its Python
+runtime from it; moving it into `api/` does not work). But it also makes Vercel
+classify the repo as a *backend framework project*, after which it routes every
+request — including static assets like `/favicon.svg` — into the Python
+function. The build log says so in as many words.
+
+Fix that where it actually lives: the project's **Framework Preset → Other** in
+the dashboard, plus `"framework": null` in `vercel.json`. The preset is decided
+when the repo is first imported and stored in project settings, so **no commit
+can change it**.
+
+### Two lessons that generalise
+
+**A stdlib-only probe separates "my code is broken" from "the host is running
 something else."** `api/diag.py` imports nothing but the standard library. When
-it failed exactly like the real app, that ruled out every application-level
-cause in one step.
+it failed identically to the real app, every application-level theory died at
+once.
 
-**Check WHICH commit is deployed before believing anything you test.** Three
-consecutive fixes appeared to do nothing because every one of them had failed to
-build, and Vercel keeps serving the last good deployment when a build fails. The
-dashboard marks it "Ready Stale" — easy to miss. The deployment list, showing
-Error against each commit, was the fastest route to the truth and should have
-been the first thing consulted, not the last.
+**Check WHICH commit is deployed before believing a test.** Three consecutive
+fixes appeared to do nothing because all three had failed to build, and Vercel
+keeps serving the last good deployment when that happens — labelled only "Ready
+Stale". The deployment list, showing Error against each commit, was the fastest
+route to the truth and should have been consulted first, not tenth.
+
+### Build scratch that must never be committed
+
+A local `vercel build` writes `pyproject.toml`, `uv.lock` and `.python-version`
+pinning the Python of the machine that ran it (`requires-python = "~=3.14.0"`).
+Committing those would force Vercel onto an unsupported runtime. All gitignored.
