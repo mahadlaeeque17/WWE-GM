@@ -6,13 +6,17 @@ always produces the same show, which makes results reproducible and bugs
 findable. No AI in this layer — Groq writes narrative on top of what happens
 here, it never decides who wins.
 
-Match quality and outcomes read the four rating categories:
+Match quality and outcomes read the five rating categories:
 
-    Experience  ring generalship. Drives quality hardest, and it is EARNED —
-                everyone starts at 0, so early shows are deliberately rough.
-    Charisma    crowd connection. Lifts quality and heat.
-    Popularity  draw. Drives heat and attendance more than match quality.
-    Looks       presentation. A modest contributor.
+    Wrestling     ring ability. Drives quality hardest. Unlike the `experience`
+                  it replaced it does NOT start at zero, so an opening-night card
+                  is separated by who is actually in it.
+    Achievements  what she has won in this save. Small on quality, real on heat —
+                  this is the loop that makes a title reign build somebody.
+    Popularity    draw. Drives heat and attendance more than match quality.
+    Looks         presentation. A modest contributor.
+    Personal      your own read on her. Deliberately given weight, so the sim
+                  does not quietly disagree with the GM.
 """
 
 from __future__ import annotations
@@ -27,10 +31,24 @@ import booking
 import rankings
 
 # How much each category contributes to in-ring match quality.
-QUALITY_WEIGHTS = {"experience": 0.45, "charisma": 0.30, "looks": 0.10, "popularity": 0.15}
+#
+# Wrestling dominates, which is the point of the category existing: under the old
+# weights this was `experience`, which everyone started on 0, so a debut card was
+# a wall of identical two-star matches no matter who was in it. Achievements
+# counts a little — a champion has been trusted in big matches and works like it —
+# and Personal counts a little because it is YOUR read on her and the sim should
+# not silently disagree with you.
+QUALITY_WEIGHTS = {"wrestling": 0.60, "popularity": 0.22, "achievements": 0.10,
+                   "looks": 0.04, "personal": 0.04}
 
 # How much each contributes to crowd heat (how much they care).
-HEAT_WEIGHTS = {"popularity": 0.50, "charisma": 0.30, "experience": 0.12, "looks": 0.08}
+#
+# Achievements earns real weight here in a way it does not for quality: a crowd
+# reacts to someone who has won things, and this is the loop that makes a title
+# reign feel like it built somebody. Wrestling matters least of the three — being
+# excellent and being cared about are different problems.
+HEAT_WEIGHTS = {"popularity": 0.48, "achievements": 0.20, "wrestling": 0.16,
+                "looks": 0.10, "personal": 0.06}
 
 BASE_INJURY_CHANCE = 0.012
 FATIGUE_PER_MATCH = 9
@@ -124,7 +142,7 @@ PRESTIGE_HEAT_SCALE = 0.08
 # Prestige eases toward the quality of the belt's matches, but ASYMMETRICALLY:
 # a classic lifts it quickly, a stinker only chips at it — and it never falls
 # below the floor its tier commands, so a green early roster cannot vaporise the
-# meaning of the world title. As experience is earned and matches improve, the
+# meaning of the world title. As Wrestling grows and matches improve, the
 # belt climbs back on its own.
 PRESTIGE_RISE = 0.12
 PRESTIGE_FALL = 0.04
@@ -153,7 +171,9 @@ def _clamp(v: float, lo: float = 0, hi: float = 100) -> float:
 
 
 def participants_attrs(con: sqlite3.Connection, wrestler_ids: list[int]) -> dict[int, dict]:
-    return {wid: game.effective_attributes(con, wid) for wid in wrestler_ids}
+    ach = game.achievement_inputs(con)
+    return {wid: game.effective_attributes(con, wid, ach.get(wid))
+            for wid in wrestler_ids}
 
 
 def simulate_match(
@@ -628,7 +648,9 @@ def auto_card(con: sqlite3.Connection, brand_id: str, matches: int = 4) -> list[
     if len(roster) < 2:
         raise ValueError(f"{brand_id} needs at least 2 healthy wrestlers under contract")
 
-    ranked = sorted(roster, key=lambda w: game.effective_attributes(con, w)["overall"], reverse=True)
+    ach = game.achievement_inputs(con)
+    ranked = sorted(roster, reverse=True,
+                    key=lambda w: game.effective_attributes(con, w, ach.get(w))["overall"])
     pairs = []
     pool = ranked[:]
     while len(pool) >= 2 and len(pairs) < matches:

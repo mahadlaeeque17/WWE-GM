@@ -114,10 +114,12 @@ def _proj_quality(con: sqlite3.Connection, card: list[dict], logistics: dict | N
     if not card:
         return 0.0
     ls = logistics_summary(logistics)
+    ach = game.achievement_inputs(con)
     total = 0.0
     for i, m in enumerate(card):
         wids = [w for t in m["teams"] for w in t]
-        ovs = [game.effective_attributes(con, w)["overall"] for w in wids] or [40]
+        ovs = [game.effective_attributes(con, w, ach.get(w))["overall"]
+               for w in wids] or [40]
         q = sum(ovs) / len(ovs) * 0.7 + stip(m.get("stipulation"))["quality"] + ls["quality"]
         if i == len(card) - 1:
             q += 4        # main event

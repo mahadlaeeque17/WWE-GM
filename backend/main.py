@@ -247,11 +247,11 @@ def roster(include_removed: bool = False) -> list[dict]:
                    w.age_at_reset AS base_age, w.age_precision,
                    w.rating, w.votes, w.adj_rating,
                    w.career_start, w.career_end,
-                   a.charisma AS d_charisma, a.popularity AS d_popularity,
-                   a.looks AS d_looks, a.availability,
+                   a.wrestling AS d_wrestling, a.popularity AS d_popularity,
+                   a.looks AS d_looks, a.personal AS d_personal, a.availability,
                    a.alignment AS d_alignment, a.personality AS d_personality,
-                   o.charisma AS o_charisma, o.popularity AS o_popularity,
-                   o.looks AS o_looks, o.experience AS o_experience,
+                   o.wrestling AS o_wrestling, o.popularity AS o_popularity,
+                   o.looks AS o_looks, o.personal AS o_personal,
                    o.age_at_reset AS o_age, o.display_name, o.notes,
                    o.alignment AS o_alignment, o.personality AS o_personality,
                    o.draft_class AS o_draft_class,
@@ -304,6 +304,10 @@ def roster(include_removed: bool = False) -> list[dict]:
         ever_contracted = {r[0] for r in c.execute("SELECT DISTINCT wrestler_id FROM contract")}
         streaks = game.streaks(c)
         bios = game.bios(c)
+        # One pass for all 270. Achievements is computed, never stored, so the
+        # roster page has to derive it — but three subqueries per row is a page
+        # load you can feel, hence the bulk read.
+        ach_inputs = game.achievement_inputs(c)
 
         season_roles = {r["wrestler_id"]: r["role"] for r in c.execute(
             "SELECT wrestler_id, role FROM season_role WHERE season_year=?", (season,))}
@@ -340,12 +344,21 @@ def roster(include_removed: bool = False) -> list[dict]:
         for r in rows:
             if r["id"] in removed and not include_removed:
                 continue
-            charisma = r["o_charisma"] if r["o_charisma"] is not None else r["d_charisma"]
-            popularity = r["o_popularity"] if r["o_popularity"] is not None else r["d_popularity"]
-            looks = r["o_looks"] if r["o_looks"] is not None else r["d_looks"]
-            experience = (r["o_experience"] if r["o_experience"] is not None
-                          else A.experience_from_sim(r["sim_matches"]))
             age = r["o_age"] if r["o_age"] is not None else r["base_age"]
+            # Exactly the same arithmetic the wrestler panel uses, called rather
+            # than re-implemented. The two used to be separate copies, which is
+            # how a rating could read one way here and another way there.
+            eff = game.with_derived({
+                "wrestling_base": (r["o_wrestling"] if r["o_wrestling"] is not None
+                                   else r["d_wrestling"]),
+                "popularity": (r["o_popularity"] if r["o_popularity"] is not None
+                               else r["d_popularity"]),
+                "looks": r["o_looks"] if r["o_looks"] is not None else r["d_looks"],
+                "personal": (r["o_personal"] if r["o_personal"] is not None
+                             else r["d_personal"]),
+                "sim_matches": r["sim_matches"], "sim_wins": r["sim_wins"],
+                "age": age,
+            }, ach_inputs.get(r["id"]))
 
             out.append({
                 "id": r["id"],
@@ -357,16 +370,20 @@ def roster(include_removed: bool = False) -> list[dict]:
                 "birthday": r["birthday"], "birthplace": r["birthplace"], "style": r["style"],
                 "rating": r["rating"], "votes": r["votes"], "adj_rating": r["adj_rating"],
                 "availability": r["availability"],
-                "experience": experience, "charisma": charisma,
-                "popularity": popularity, "looks": looks,
-                "overall": A.overall(experience, charisma, popularity, looks),
-                "value": A.contract_value(experience, charisma, popularity, looks, age),
+                "wrestling": eff["wrestling"],
+                "wrestling_base": eff["wrestling_base"],
+                "record_swing": eff["record_swing"],
+                "achievements": eff["achievements"],
+                "achievement_reasons": eff["achievement_reasons"],
+                "popularity": eff["popularity"], "looks": eff["looks"],
+                "personal": eff["personal"],
+                "overall": eff["overall"], "value": eff["value"],
                 "age_multiplier": round(A.age_multiplier(age), 3),
                 "edited": {
-                    "experience": r["o_experience"] is not None,
-                    "charisma": r["o_charisma"] is not None,
+                    "wrestling": r["o_wrestling"] is not None,
                     "popularity": r["o_popularity"] is not None,
                     "looks": r["o_looks"] is not None,
+                    "personal": r["o_personal"] is not None,
                     "age": r["o_age"] is not None,
                     "name": bool(r["display_name"]),
                 },
@@ -411,10 +428,14 @@ def roster(include_removed: bool = False) -> list[dict]:
 
 
 class Override(BaseModel):
-    experience: int | None = Field(None, ge=0, le=100)
-    charisma: int | None = Field(None, ge=0, le=100)
-    popularity: int | None = Field(None, ge=0, le=100)
-    looks: int | None = Field(None, ge=0, le=100)
+    # Bounded by CAT_MAX rather than a loose 100, so a value that cannot exist
+    # is rejected at the edge instead of being silently clamped four layers in.
+    # Achievements is absent on purpose: it is computed from what she has won, so
+    # there is nothing here to set — you award the title or the accolade instead.
+    wrestling: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    popularity: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    looks: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    personal: int | None = Field(None, ge=0, le=A.CAT_MAX)
     age_at_reset: int | None = Field(None, ge=0, le=120)
     role: str | None = None
     display_name: str | None = None
@@ -431,16 +452,16 @@ def set_override(wid: int, body: Override) -> dict:
         from datetime import datetime, timezone
         c.execute(
             """INSERT INTO attribute_override
-               (wrestler_id, experience, charisma, popularity, looks,
+               (wrestler_id, wrestling, popularity, looks, personal,
                 age_at_reset, role, display_name, notes, updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(wrestler_id) DO UPDATE SET
-                 experience=excluded.experience, charisma=excluded.charisma,
-                 popularity=excluded.popularity, looks=excluded.looks,
+                 wrestling=excluded.wrestling, popularity=excluded.popularity,
+                 looks=excluded.looks, personal=excluded.personal,
                  age_at_reset=excluded.age_at_reset, role=excluded.role,
                  display_name=excluded.display_name, notes=excluded.notes,
                  updated_at=excluded.updated_at""",
-            (wid, body.experience, body.charisma, body.popularity, body.looks,
+            (wid, body.wrestling, body.popularity, body.looks, body.personal,
              body.age_at_reset, body.role, body.display_name, body.notes,
              datetime.now(timezone.utc).isoformat()),
         )
@@ -929,9 +950,10 @@ def bookable(brand_id: str) -> dict:
                  AND c.start_year<=? AND c.end_year>=?
                ORDER BY name""", (brand_id, season, season)).fetchall()
         wrestlers = []
+        ach = game.achievement_inputs(c)
         for r in rows:
             d = dict(r)
-            d["overall"] = game.effective_attributes(c, r["id"])["overall"]
+            d["overall"] = game.effective_attributes(c, r["id"], ach.get(r["id"]))["overall"]
             d["healthy"] = not (r["injured_until"] and r["injured_until"] > today)
             wrestlers.append(d)
         titles = [dict(t) for t in c.execute(

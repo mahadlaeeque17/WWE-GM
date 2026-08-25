@@ -230,7 +230,9 @@ def promo(con: sqlite3.Connection, wrestler_id: int, target_id: int | None = Non
     """A promo cut by one wrestler, optionally aimed at a rival."""
     name = _name(con, wrestler_id)
     eff = con.execute(
-        """SELECT COALESCE(o.charisma,a.charisma) cha, w.style
+        # Popularity, not charisma: promo skill is one of its three
+        # components now, so it is where "can she talk" lives.
+        """SELECT COALESCE(o.popularity,a.popularity) cha, w.style
            FROM wrestler w JOIN attributes a ON a.wrestler_id=w.id
            LEFT JOIN attribute_override o ON o.wrestler_id=w.id WHERE w.id=?""",
         (wrestler_id,)).fetchone()
@@ -262,7 +264,7 @@ def storyline(con: sqlite3.Connection, brand_id: str) -> dict:
     season = season["season_year"] if season else 2000
     roster = con.execute(
         """SELECT w.name,
-                  COALESCE(o.charisma,a.charisma)+COALESCE(o.popularity,a.popularity) heat,
+                  COALESCE(o.popularity,a.popularity)*2 heat,
                   COALESCE(s.momentum,50) momentum
            FROM contract c
            JOIN wrestler w ON w.id=c.wrestler_id
@@ -378,8 +380,8 @@ def rival_booking(con: sqlite3.Connection, brand_id: str, matches: int = 4) -> d
     sy, today = season["season_year"], season["current_date"]
     roster = con.execute(
         """SELECT w.id, w.name, w.style,
-                  COALESCE(o.charisma,a.charisma)+COALESCE(o.popularity,a.popularity)
-                    +COALESCE(o.looks,a.looks) ovr,
+                  COALESCE(o.wrestling,a.wrestling)+COALESCE(o.popularity,a.popularity)
+                    +COALESCE(o.looks,a.looks)+COALESCE(o.personal,a.personal) ovr,
                   COALESCE(s.momentum,50) momentum, COALESCE(s.morale,50) morale
            FROM contract c
            JOIN wrestler w ON w.id=c.wrestler_id

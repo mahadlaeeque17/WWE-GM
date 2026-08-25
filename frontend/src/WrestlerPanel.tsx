@@ -11,22 +11,37 @@ import {
 import { AlignChip } from './ui'
 import { usePhotos } from './prefs'
 
-const CATEGORIES = [
-  ['experience', 'Experience', 'Earned in the sim — not real life'],
-  ['charisma', 'Charisma', 'Promo skill and likeability'],
-  ['popularity', 'Popularity', 'Star power and draw'],
-  ['looks', 'Looks', 'Placeholder — cagematch has no looks data'],
+/**
+ * The four categories you can TYPE A NUMBER INTO.
+ *
+ * Achievements is the fifth and is absent here on purpose: it is computed from
+ * what she has won in this save, so it gets its own read-only block below with
+ * the reasons spelled out. Giving it a slider would imply you could award
+ * yourself a title reign by dragging.
+ *
+ * Wrestling's slider edits the stored BASE. The number on the roster page adds
+ * her win/loss swing on top, so the two can legitimately differ — which is why
+ * the hint says so out loud.
+ */
+const EDIT_CATEGORIES = [
+  ['wrestling', 'Wrestling', 'In-ring ability. Her save record shifts the shown value up or down by about 3'],
+  ['popularity', 'Popularity', 'Star power: cagematch score, how many people cared, and promo skill'],
+  ['looks', 'Looks', 'Yours to set — cagematch has no looks data and never will'],
+  ['personal', 'Personal', 'Yours alone. Nothing derives it and nothing suggests a change to it'],
 ] as const
 
-type CatKey = typeof CATEGORIES[number][0]
+type CatKey = typeof EDIT_CATEGORIES[number][0]
 
 export default function WrestlerPanel({
   row, brands, onClose,
 }: { row: RosterRow; brands: BrandFinance[]; onClose: () => void }) {
   const qc = useQueryClient()
+  // Wrestling seeds from wrestling_base, NOT from the shown wrestling: opening
+  // the panel and pressing save must not bake her current hot streak into the
+  // permanent value.
   const [draft, setDraft] = useState<Record<CatKey | 'age', number | null>>({
-    experience: row.experience, charisma: row.charisma,
-    popularity: row.popularity, looks: row.looks, age: row.age,
+    wrestling: row.wrestling_base, popularity: row.popularity,
+    looks: row.looks, personal: row.personal, age: row.age,
   })
   const [years, setYears] = useState(2)
   const [err, setErr] = useState<string | null>(null)
@@ -35,8 +50,8 @@ export default function WrestlerPanel({
   // previous wrestler's numbers linger in the inputs.
   useEffect(() => {
     setDraft({
-      experience: row.experience, charisma: row.charisma,
-      popularity: row.popularity, looks: row.looks, age: row.age,
+      wrestling: row.wrestling_base, popularity: row.popularity,
+      looks: row.looks, personal: row.personal, age: row.age,
     })
     setTouched(new Set())
     setErr(null)
@@ -51,6 +66,11 @@ export default function WrestlerPanel({
   // as overrides — persisting all four every time would freeze the three you
   // never touched at today's derived value, so retuning a formula later would
   // silently skip this wrestler.
+  //
+  // This matters MORE now than it did: Looks and Personal are yours outright, so
+  // an accidental override on Wrestling or Popularity is the difference between
+  // a roster that tracks the formula and one frozen at whatever it read the day
+  // you happened to open the panel.
   const [touched, setTouched] = useState<Set<CatKey | 'age'>>(new Set())
 
   const set = (key: CatKey | 'age', v: number | null) => {
@@ -64,10 +84,10 @@ export default function WrestlerPanel({
       // edit would wipe them.
       const keep = (k: CatKey | 'age') => touched.has(k) || row.edited[k]
       return saveOverride(row.id, {
-        experience: keep('experience') ? draft.experience : null,
-        charisma: keep('charisma') ? draft.charisma : null,
+        wrestling: keep('wrestling') ? draft.wrestling : null,
         popularity: keep('popularity') ? draft.popularity : null,
         looks: keep('looks') ? draft.looks : null,
+        personal: keep('personal') ? draft.personal : null,
         age_at_reset: keep('age') ? draft.age : null,
       })
     },
@@ -169,7 +189,12 @@ export default function WrestlerPanel({
     onError: (e: Error) => setErr(e.message),
   })
 
-  const dirty = CATEGORIES.some(([k]) => draft[k] !== row[k]) || draft.age !== row.age
+  // Wrestling compares against wrestling_base, not the shown wrestling — the
+  // slider edits the base, so comparing to the swung value would mark the panel
+  // dirty the moment a wrestler goes on a run.
+  const dirty = EDIT_CATEGORIES.some(([k]) =>
+    draft[k] !== (k === 'wrestling' ? row.wrestling_base : row[k])
+  ) || draft.age !== row.age
   const anyEdited = Object.values(row.edited).some(Boolean)
 
   const [imgYear, setImgYear] = useState<number | null>(null)  // image id, not year
@@ -390,7 +415,7 @@ export default function WrestlerPanel({
             </div>
           </div>
           <div className="mt-3 pt-3 border-t border-edge-soft text-[11px] text-slate-500 leading-snug">
-            Four categories, each out of {CAT_MAX}. Age {ageLabel(row.age, row.age_precision)} applies a{' '}
+            Five categories, each out of {CAT_MAX}. Age {ageLabel(row.age, row.age_precision)} applies a{' '}
             <span className={row.age_multiplier >= 1 ? 'text-emerald-400 font-semibold' : 'text-raw font-semibold'}>
               ×{row.age_multiplier.toFixed(2)}
             </span>{' '}
@@ -412,12 +437,52 @@ export default function WrestlerPanel({
             )}
           </div>
 
-          {CATEGORIES.map(([key, label, hint]) => (
+          {/* Achievements first, and read-only. It is the one rating you change
+              by booking rather than by typing, so it is shown as a record of
+              what happened — with the reasons — rather than as a control. */}
+          <div className="mb-4 rounded border border-edge-soft bg-canvas/40 px-2.5 py-2">
+            <div className="flex justify-between items-baseline">
+              <span className="label text-[10px] text-slate-400">
+                Achievements
+                <span className="ml-1.5 text-slate-600 normal-case tracking-normal">earned, not set</span>
+              </span>
+              <span className="tnum">
+                <span className={`stat text-[15px] ${row.achievements > 0 ? 'text-gold' : 'text-slate-600'}`}>
+                  {row.achievements}
+                </span>
+                <span className="text-slate-600 text-[11px]">/{CAT_MAX}</span>
+              </span>
+            </div>
+            <div className="h-[3px] mt-1.5 rounded-full bg-edge-soft overflow-hidden">
+              <div className="h-full rounded-full bg-gold/70"
+                   style={{ width: `${(row.achievements / CAT_MAX) * 100}%` }} />
+            </div>
+            {row.achievement_reasons.length > 0 ? (
+              <ul className="mt-1.5 text-[10px] text-slate-400 leading-relaxed">
+                {row.achievement_reasons.map((r) => <li key={r}>· {r}</li>)}
+              </ul>
+            ) : (
+              <p className="text-[10px] text-slate-600 mt-1">
+                Nothing won in this save yet. Titles, Royal Rumbles, Playboy covers
+                and awards all count — real-life honours do not.
+              </p>
+            )}
+          </div>
+
+          {EDIT_CATEGORIES.map(([key, label, hint]) => (
             <div key={key} className="mb-3">
               <div className="flex justify-between text-xs mb-1">
                 <span className="label text-[10px] text-slate-400">
                   {label}
                   {row.edited[key] && <span className="ml-1.5 text-gold" title="hand-edited">✎</span>}
+                  {key === 'wrestling' && Math.abs(row.record_swing) >= 0.5 && (
+                    <span
+                      className={`ml-1.5 normal-case tracking-normal ${row.record_swing > 0 ? 'text-emerald-400' : 'text-blood'}`}
+                      title={`${row.sim.wins}-${row.sim.losses} in this save`}
+                    >
+                      showing {row.wrestling} ({row.record_swing > 0 ? '+' : ''}{row.record_swing} form)
+                    </span>
+                  )}
                 </span>
                 <span className="tnum">
                   <input

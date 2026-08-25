@@ -210,12 +210,12 @@ def main(src: Path, dbpath: Path) -> None:
 
         con.execute(
             """INSERT INTO attributes
-               (wrestler_id, charisma, popularity, looks, availability,
+               (wrestler_id, wrestling, popularity, looks, personal, availability,
                 role, role_source, personality, formula_ver)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (wid, attrs["charisma"], attrs["popularity"], attrs["looks"],
-             attrs["availability"], attrs["role"], attrs["role_source"],
-             attrs["personality"], attrs["formula_ver"]),
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (wid, attrs["wrestling"], attrs["popularity"], attrs["looks"],
+             attrs["personal"], attrs["availability"], attrs["role"],
+             attrs["role_source"], attrs["personality"], attrs["formula_ver"]),
         )
 
         # Seed sim state without disturbing an existing save.

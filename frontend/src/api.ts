@@ -1,8 +1,33 @@
 export type Availability = 'active_2000' | 'legend' | 'import'
 
-/** Each rating category is scored out of 25; the four sum to a 0-100 overall. */
-export const CAT_MAX = 25
+/** Each rating category is scored out of 20; the five sum to a 0-100 overall. */
+export const CAT_MAX = 20
 export const OVERALL_MAX = 100
+
+/**
+ * The five categories, in the order they are shown everywhere.
+ *
+ * Two of them are NOT editable and the UI has to know which:
+ *   achievements  computed from what she has won in this save. You raise it by
+ *                 awarding a title or an accolade, never by typing a number.
+ *   wrestling     editable, but what you edit is the BASE. The number shown
+ *                 includes a live swing from her win/loss record on top.
+ */
+export const CATEGORIES = [
+  { key: 'wrestling', label: 'WRS', full: 'Wrestling',
+    hint: 'In-ring ability, moved by her win/loss record in this save' },
+  { key: 'achievements', label: 'ACH', full: 'Achievements',
+    hint: 'What she has won in THIS save — titles, Rumbles, awards. Starts at 0' },
+  { key: 'popularity', label: 'POP', full: 'Popularity',
+    hint: 'Star power: cagematch score, how many people cared, and promo skill' },
+  { key: 'looks', label: 'LKS', full: 'Looks', hint: 'Yours to set' },
+  { key: 'personal', label: 'PER', full: 'Personal', hint: 'Yours alone' },
+] as const
+
+export type CategoryKey = typeof CATEGORIES[number]['key']
+
+/** Categories you can type a number into. Achievements is earned, not set. */
+export const EDITABLE: CategoryKey[] = ['wrestling', 'popularity', 'looks', 'personal']
 
 export interface Contract {
   id: number; wrestler_id: number; brand_id: string
@@ -48,14 +73,23 @@ export interface RosterRow {
   votes: number | null
   adj_rating: number | null
   availability: Availability
-  experience: number
-  charisma: number
+  /** In-ring ability as shown: the stored base plus her record swing. */
+  wrestling: number
+  /** The stored half of Wrestling — this is what an edit writes to. */
+  wrestling_base: number
+  /** How far her save win/loss record moves Wrestling, roughly -3..+3. */
+  record_swing: number
+  /** Computed from this save's titles and accolades. 0 until she wins something. */
+  achievements: number
+  /** Plain-English reasons behind the Achievements score, biggest first. */
+  achievement_reasons: string[]
   popularity: number
   looks: number
+  personal: number
   overall: number
   value: number
   age_multiplier: number
-  edited: Record<'experience' | 'charisma' | 'popularity' | 'looks' | 'age' | 'name', boolean>
+  edited: Record<'wrestling' | 'popularity' | 'looks' | 'personal' | 'age' | 'name', boolean>
   notes: string | null
   nickname: string | null
   bio: string | null
@@ -193,8 +227,10 @@ export interface Personality { key: string; label: string; desc: string; factor:
 export const fetchPersonalities = () => req<Personality[]>('/api/negotiate/personalities')
 
 export interface OverrideBody {
-  experience?: number | null; charisma?: number | null
-  popularity?: number | null; looks?: number | null
+  // No `achievements`: it is computed from what she has won, so there is nothing
+  // to send. Award the title or the accolade instead.
+  wrestling?: number | null; popularity?: number | null
+  looks?: number | null; personal?: number | null
   age_at_reset?: number | null; role?: string | null
   display_name?: string | null; notes?: string | null
 }
@@ -571,7 +607,7 @@ export interface RatingChange {
   season_year: number
   wrestler_id: number
   name: string
-  category: 'charisma' | 'popularity' | 'looks'
+  category: 'wrestling' | 'popularity'
   from_value: number
   to_value: number
   suggested: number

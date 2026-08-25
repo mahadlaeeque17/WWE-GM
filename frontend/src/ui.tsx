@@ -80,12 +80,30 @@ export function catTone(v: number): string {
   return 'text-slate-500'
 }
 
-/** A category value with a thin fill bar underneath — reads at a glance. */
-export function StatCell({ v, edited = false }: { v: number; edited?: boolean }) {
+/**
+ * A category value with a thin fill bar underneath — reads at a glance.
+ *
+ * `swing` marks a value that is not purely stored: Wrestling carries a live
+ * adjustment from her win/loss record, and showing it as `17 ⁺²` rather than
+ * just `17` is the difference between a number you trust and a number you
+ * assume is a typo when it moves on its own.
+ *
+ * `title` is for a computed category that owes the reader an explanation —
+ * Achievements hangs its reasons ("2× world titles · a Rumble") off the hover.
+ */
+export function StatCell({ v, edited = false, swing = 0, title }: {
+  v: number; edited?: boolean; swing?: number; title?: string
+}) {
+  const hot = Math.abs(swing) >= 0.5
   return (
-    <td className="px-2 py-2 text-right align-middle">
+    <td className="px-2 py-2 text-right align-middle" title={title}>
       <div className={`stat text-[15px] leading-none ${catTone(v)}`}>
         {v}
+        {hot && (
+          <span className={`text-[9px] align-super ml-0.5 ${swing > 0 ? 'text-emerald-400' : 'text-blood'}`}>
+            {swing > 0 ? '▲' : '▼'}
+          </span>
+        )}
         {edited && <span className="text-gold text-[9px] align-super ml-0.5">✎</span>}
       </div>
       <div className="h-[3px] mt-1.5 rounded-full bg-edge-soft overflow-hidden ml-auto w-9">

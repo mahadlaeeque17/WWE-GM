@@ -12,17 +12,27 @@ and all write nothing the GM has not seen:
                  belt's brand, tier, team size and weight limit. Rank 1 is the
                  #1 contender unless the GM has pinned someone by hand.
 
-  PROGRESSION    Season-end growth and regression of charisma / popularity /
-                 looks, from what she did that year. Emitted as SUGGESTIONS
-                 only: nothing touches a rating until the GM approves it.
+  PROGRESSION    Season-end growth and regression of WRESTLING and
+                 POPULARITY, from what she did that year. Emitted as
+                 SUGGESTIONS only: nothing touches a rating until the GM
+                 approves it.
 
 Deliberate design notes
 -----------------------
 
-*Experience is not in the progression engine.* It is already earned in the sim
-(`30·log10(matches+1)`) and updates itself. The three categories that were
-frozen forever at their seeded value are charisma, popularity and looks — those
-are the actual gap, so those are what moves.
+*Only two of the five categories are here, and the other three are excluded for
+three different reasons.* Achievements is computed from what she has won, so
+there is nothing to suggest — you award the belt and the number follows. Looks
+and Personal belong to the GM outright (`attributes.GM_OWNED`): an engine that
+quietly proposed a Looks change every December would be second-guessing a purely
+personal call, so it does not get to. That leaves Wrestling and Popularity, which
+are the two that genuinely should move on a year's work.
+
+*Wrestling progression moves the BASE, not the shown number.* The shown Wrestling
+already includes a live swing from her win/loss record, which is form. What a
+season of good work should change is the underlying ability, permanently — so the
+two do not double-count, and a wrestler can have a bad year of booking without
+losing what she can do.
 
 *Approved changes are written to `attribute_override`.* That is the layer
 `normalize.py` never touches, and it is honest: an approved progression IS a
@@ -38,6 +48,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, timedelta
 
+import attributes as A
 import game
 
 # ---------------------------------------------------------------- schema
@@ -81,7 +92,7 @@ CREATE TABLE IF NOT EXISTS rating_change (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     season_year  INTEGER NOT NULL,
     wrestler_id  INTEGER NOT NULL REFERENCES wrestler(id),
-    category     TEXT NOT NULL,          -- charisma | popularity | looks
+    category     TEXT NOT NULL,          -- wrestling | popularity
     from_value   INTEGER NOT NULL,
     to_value     INTEGER NOT NULL,       -- what gets applied; the GM may edit it
     suggested    INTEGER NOT NULL,       -- what the engine originally proposed
@@ -133,7 +144,7 @@ PPV_MULT = 1.5
 
 # Standing weights — what you are worth even in a week you did not wrestle.
 MOMENTUM_WEIGHT = 0.35              # (momentum - 50) * this
-POPULARITY_WEIGHT = 0.80            # popularity is /25, so up to +20
+POPULARITY_WEIGHT = 1.00            # popularity is /20, so up to +20
 FEUD_HEAT_WEIGHT = 0.15
 IDLE_PENALTY = 0.55                 # score multiplier when she did not work at all
 
@@ -293,9 +304,10 @@ def power_scores(con: sqlite3.Connection, as_of: str | None = None,
         heat[r["b_id"]] = max(heat.get(r["b_id"], 0), r["heat"])
 
     out = []
+    ach = game.achievement_inputs(con)
     for wid, st in stats.items():
         try:
-            eff = game.effective_attributes(con, wid)
+            eff = game.effective_attributes(con, wid, ach.get(wid))
         except ValueError:
             continue
         mom = con.execute("SELECT momentum FROM wrestler_state WHERE wrestler_id=?",
@@ -776,11 +788,14 @@ def lock_contender(con: sqlite3.Connection, title_id: int, wrestler_id: int | No
 
 # ================================================================ PROGRESSION
 
-# Every category is out of 25, so a single point is a 4% move. These caps are
-# what stop a ten-season save from turning the whole roster into 25s.
+# Every category is out of 20, so a single point is a 5% move — the caps below
+# are what stop a ten-season save from turning the whole roster into 20s. They
+# are deliberately unchanged from the /25 era even though a point is now worth
+# more: only two categories progress instead of three, so the most a season can
+# do to an overall went DOWN, which is the right direction for a long save.
 MAX_DELTA_PER_CATEGORY = 3
-MAX_OVERALL_DELTA = 6
-CAT_MIN, CAT_MAX = 1, 25
+MAX_OVERALL_DELTA = 5
+CAT_MIN, CAT_MAX = 1, A.CAT_MAX
 
 # Age shapes how fast someone grows and how hard they fall. (min_age, growth×, decline×)
 AGE_BANDS = [
@@ -873,10 +888,9 @@ def season_performance(con: sqlite3.Connection, season: int) -> list[dict]:
 def season_context(con: sqlite3.Connection, season: int) -> dict:
     """League-wide baselines for the season, so the grade is RELATIVE.
 
-    Two things forced this. Match quality in this sim is not anchored to 55 —
-    it starts low because experience starts at zero and climbs across the save,
-    so a fixed baseline quietly marks the whole roster down in year one and up
-    in year eight. And counting main events and Power-10 weeks as raw totals
+    Two things forced this. Match quality in this sim is not anchored to 55 — it
+    climbs across a save as Wrestling and Achievements grow, so a fixed baseline
+    quietly marks the whole roster down in year one and up in year eight. And counting main events and Power-10 weeks as raw totals
     made the score depend on how many shows you happened to run: forty weeks of
     television maxed out every headliner at 100/100. Both are now rates against
     what the league actually did.
@@ -922,7 +936,7 @@ def _reason(con, st: dict, cat: str, delta: int, score: float, ctx: dict) -> str
         bits.append(rec)
         if st["avg_quality"]:
             # Against the league, not against an absolute — match quality drifts
-            # upward across a save as the roster gains experience.
+            # upward across a save as Wrestling and Achievements accumulate.
             bits.append(f"match quality {st['avg_quality']} vs league "
                         f"{ctx['league_quality']:.0f}")
     else:
@@ -955,11 +969,12 @@ def evaluate_season(con: sqlite3.Connection, season: int) -> dict:
     con.execute("DELETE FROM rating_change WHERE season_year=? AND status='pending'", (season,))
 
     ctx = season_context(con, season)
+    ach = game.achievement_inputs(con)
     created = 0
     for st in season_performance(con, season):
         wid = st["wrestler_id"]
         try:
-            eff = game.effective_attributes(con, wid)
+            eff = game.effective_attributes(con, wid, ach.get(wid))
         except ValueError:
             continue
         score = _season_score(st, ctx)
@@ -968,22 +983,27 @@ def evaluate_season(con: sqlite3.Connection, season: int) -> dict:
         raw = {
             # Popularity is exposure: titles, main events, being on the board.
             "popularity": (score - 52.0) / 9.0,
-            # Charisma is slower — it moves on quality, heat and recognition.
-            "charisma": (score - 55.0) / 12.0 + (0.5 if st["nominations"] else 0.0),
-            # Looks barely moves. Age takes it away; a young star on the rise
-            # grows into her presentation.
-            "looks": (-0.5 if (eff["age"] or 30) >= 36 else 0.0)
-                     + (0.5 if (eff["age"] or 30) <= 24 and score > 65 else 0.0),
+            # Wrestling is slower and harder to move, because ability is not a
+            # reward for being booked well. It responds to actually working —
+            # match volume and match quality — and a wrestler who did not wrestle
+            # at all goes backwards regardless of how over she is.
+            "wrestling": ((score - 58.0) / 14.0
+                          + (0.4 if st["matches"] >= 25 else 0.0)
+                          + (0.4 if st["nominations"] else 0.0)),
         }
         if st["matches"] == 0:
             raw["popularity"] = min(raw["popularity"], -1.5)
+            raw["wrestling"] = min(raw["wrestling"], -1.0)
 
         proposals, total = [], 0
-        for cat in ("popularity", "charisma", "looks"):
+        for cat in ("popularity", "wrestling"):
             v = raw[cat] * (grow if raw[cat] > 0 else decline)
             delta = int(round(v))
             delta = max(-MAX_DELTA_PER_CATEGORY, min(MAX_DELTA_PER_CATEGORY, delta))
-            cur = eff[cat]
+            # Wrestling progression is applied to the stored BASE. Reading the
+            # shown value here would fold her win/loss swing into a permanent
+            # change and then swing it again on top.
+            cur = eff["wrestling_base"] if cat == "wrestling" else eff[cat]
             new = max(CAT_MIN, min(CAT_MAX, cur + delta))
             delta = new - cur
             if delta == 0 or (wid, cat) in resolved:
@@ -1058,7 +1078,7 @@ def resolve_change(con: sqlite3.Connection, change_id: int, approve: bool,
     val = c["to_value"] if to_value is None else int(to_value)
     val = max(CAT_MIN, min(CAT_MAX, val))
     cat = c["category"]
-    if cat not in ("charisma", "popularity", "looks"):
+    if cat not in ("wrestling", "popularity"):
         raise game.SigningError(f"cannot apply {cat}")
 
     con.execute(

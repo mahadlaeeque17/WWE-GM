@@ -4,6 +4,7 @@ import {
   fetchRoster, fetchBrands, fetchHealth, newGame, scanImages, syncDrive,
   fetchImageStatus, fetchCalendar, advanceMonth, fetchLogos,
   fetchSettings, saveSettings, money, ageLabel, fetchStoreStatus,
+  CATEGORIES, type CategoryKey,
 } from './api'
 import { setSoundEnabled } from './sound'
 import { Avatar, StatCell, OverallBadge, BrandChip, Pill } from './ui'
@@ -39,16 +40,12 @@ const TABS: { key: Tab; label: string; brand?: string }[] = [
   { key: 'shows', label: 'Shows' },
   { key: 'images', label: 'Images' },
 ]
-type SortKey = 'overall' | 'value' | 'experience' | 'charisma' | 'popularity'
-  | 'looks' | 'age' | 'name' | 'morale'
+type SortKey = 'overall' | 'value' | 'age' | 'name' | 'morale' | CategoryKey
 
-const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
+const COLUMNS: { key: SortKey; label: string; numeric: boolean; hint?: string }[] = [
   { key: 'name', label: 'Wrestler', numeric: false },
   { key: 'age', label: 'Age', numeric: true },
-  { key: 'experience', label: 'EXP', numeric: true },
-  { key: 'charisma', label: 'CHA', numeric: true },
-  { key: 'popularity', label: 'POP', numeric: true },
-  { key: 'looks', label: 'LKS', numeric: true },
+  ...CATEGORIES.map((c) => ({ key: c.key as SortKey, label: c.label, numeric: true, hint: c.hint })),
   { key: 'morale', label: 'MRL', numeric: true },
   { key: 'overall', label: 'OVR', numeric: true },
   { key: 'value', label: 'Value', numeric: true },
@@ -425,6 +422,7 @@ export default function App() {
                         <th
                           key={c.key}
                           onClick={() => toggleSort(c.key)}
+                          title={c.hint}
                           className={`label text-[10px] text-slate-500 px-3 py-3
                                       cursor-pointer select-none hover:text-slate-200
                                       ${c.numeric ? 'text-right' : 'text-left'}`}
@@ -483,10 +481,11 @@ export default function App() {
                           <td className="px-3 py-2 text-right stat text-[15px] text-slate-400">
                             {ageLabel(r.age, r.age_precision)}
                           </td>
-                          <StatCell v={r.experience} edited={r.edited.experience} />
-                          <StatCell v={r.charisma} edited={r.edited.charisma} />
+                          <StatCell v={r.wrestling} edited={r.edited.wrestling} swing={r.record_swing} />
+                          <StatCell v={r.achievements} title={r.achievement_reasons.join(' · ') || 'Nothing won yet in this save'} />
                           <StatCell v={r.popularity} edited={r.edited.popularity} />
                           <StatCell v={r.looks} edited={r.edited.looks} />
+                          <StatCell v={r.personal} edited={r.edited.personal} />
                           <td className="px-3 py-2 text-right">
                             <span className={`stat text-[15px] ${r.sim.morale >= 66 ? 'text-emerald-300'
                               : r.sim.morale <= 34 ? 'text-blood' : 'text-slate-400'}`}>
@@ -530,9 +529,9 @@ export default function App() {
 
       <footer className="border-t border-edge px-6 py-2 text-[11px] text-slate-600">
         {tab === 'roster' && <>{rows.length} shown · </>}
-        Each category is out of 25, four summing to 100 · Experience is earned in
-        the sim · Looks is a placeholder, cagematch has no looks data · ✎ marks a
-        hand-edited value
+        Each category is out of 20, five summing to 100 · Achievements counts only
+        what she has won in THIS save · Wrestling shifts with her win/loss record
+        · Looks and Personal are yours · ✎ marks a hand-edited value
       </footer>
     </div>
   )

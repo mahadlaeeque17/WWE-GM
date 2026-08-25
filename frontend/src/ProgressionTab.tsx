@@ -7,7 +7,7 @@ import {
 import { Avatar, Pill } from './ui'
 
 const CAT_LABEL: Record<string, string> = {
-  charisma: 'Charisma', popularity: 'Popularity', looks: 'Looks',
+  wrestling: 'Wrestling', popularity: 'Popularity',
 }
 
 /** from → to as a bar, so the size of the move is visible before you read it. */
@@ -143,12 +143,15 @@ export default function ProgressionTab({ roster }: { roster: RosterRow[] }) {
 
       <div className="flex-1 overflow-auto p-4">
         <p className="text-[11px] text-slate-600 mb-3 max-w-3xl leading-snug">
-          Charisma, popularity and looks move at the end of each season based on what
-          she actually did — record, match quality, main events, title reigns, weeks
-          in the POWER 25, awards, momentum and age. <span className="text-slate-400">
-          Nothing here is applied until you approve it</span>, and you can approve at a
-          different number than the one suggested. Experience is not listed: it is
-          already earned in the sim and updates itself.
+          Wrestling and Popularity move at the end of each season based on what she
+          actually did — record, match quality, main events, title reigns, weeks in
+          the POWER 25, awards, momentum and age. <span className="text-slate-400">
+          Nothing here is applied until you approve it</span>, and you can approve at
+          a different number than the one suggested. The other three are absent for
+          three different reasons: Achievements is computed from what she has won,
+          and <span className="text-slate-400">Looks and Personal are yours</span> —
+          no engine gets to second-guess those. A Wrestling change moves her base
+          ability, not the win/loss swing shown on top of it.
         </p>
 
         {isLoading && <p className="text-sm text-slate-500">Loading…</p>}

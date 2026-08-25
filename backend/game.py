@@ -28,9 +28,16 @@ BRANDS = [
 
 # Season budget per brand, and how fast it grows. The NBA cap was ~$34M in 2000
 # and grew roughly 5-10% a year; this is the same shape scaled to a roster of
-# ~20 women whose contracts top out near $1.1M.
-STARTING_BUDGET = 10_000_000
-BUDGET_GROWTH = 0.06
+# ~20 women whose contracts top out near $1.2M.
+#
+# Both numbers were lifted when Achievements arrived. The steeper contract curve
+# costs a brand about 20% more to assemble the same twenty wrestlers, and — the
+# part that compounds — Achievements only ever goes UP, so every champion you
+# keep gets more expensive every year you keep her. 6% growth was set against a
+# roster whose ratings were frozen; against one that climbs it slowly strangles
+# you, and "I cannot re-sign anybody" is a worse game than "I must choose".
+STARTING_BUDGET = 12_000_000
+BUDGET_GROWTH = 0.07
 
 # How far ahead budgets are projected when a save is created.
 BUDGET_HORIZON_YEARS = 25
@@ -175,19 +182,96 @@ def bios(con: sqlite3.Connection) -> dict[int, dict]:
             for r in con.execute("SELECT wrestler_id, nickname, bio FROM wrestler_bio")}
 
 
-def effective_attributes(con: sqlite3.Connection, wrestler_id: int) -> dict:
-    """Override wins, derived is the fallback, experience comes from the sim."""
+# ------------------------------------------------------------- achievements
+#
+# Achievements is the one rating with no stored value anywhere. It is a fact
+# about the save — what she has actually won on the shows you booked — so it is
+# read from the record every time and never cached. A stored copy would go stale
+# the instant a belt changed hands and then sit on the roster page contradicting
+# the trophy cabinet directly below it.
+
+def achievement_inputs(con: sqlite3.Connection) -> dict[int, dict]:
+    """Every wrestler's in-save honours, in ONE pass over the tables.
+
+    Bulk rather than per-wrestler because the roster endpoint needs all 270 at
+    once, and three subqueries × 270 rows is a page load you can feel. The
+    per-wrestler path reads out of the same dict.
+    """
+    reigns: dict[int, dict[str, int]] = {}
+    days: dict[int, int] = {}
+    for r in con.execute(
+            """SELECT r.wrestler_id AS wid, t.tier AS tier,
+                      COUNT(*) AS n,
+                      COALESCE(SUM(
+                        -- game_state.current_date must stay table-qualified: a
+                        -- bare `current_date` is a SQLite keyword and returns
+                        -- TODAY, which would credit an ongoing reign with every
+                        -- day since the year 2000.
+                        CASE WHEN r.lost_on IS NULL
+                             THEN julianday(COALESCE((SELECT game_state.current_date
+                                                        FROM game_state WHERE id=1),
+                                                     r.won_on)) - julianday(r.won_on)
+                             ELSE julianday(r.lost_on) - julianday(r.won_on) END), 0) AS d
+                 FROM game_title_reign r
+                 JOIN game_title t ON t.id = r.title_id
+                GROUP BY r.wrestler_id, t.tier"""):
+        reigns.setdefault(r["wid"], {})[r["tier"]] = r["n"]
+        days[r["wid"]] = days.get(r["wid"], 0) + int(max(0, r["d"] or 0))
+
+    accolades: dict[int, dict[str, int]] = {}
+    for r in con.execute("""SELECT wrestler_id AS wid, kind, COUNT(*) AS n
+                              FROM accomplishment GROUP BY wrestler_id, kind"""):
+        accolades.setdefault(r["wid"], {})[r["kind"]] = r["n"]
+
+    out: dict[int, dict] = {}
+    for wid in set(reigns) | set(accolades):
+        out[wid] = {"reigns": reigns.get(wid, {}),
+                    "title_days": days.get(wid, 0),
+                    "accolades": accolades.get(wid, {})}
+    return out
+
+
+_EMPTY_ACHIEVEMENTS = {"reigns": {}, "title_days": 0, "accolades": {}}
+
+
+def achievement_score(inputs: dict | None) -> int:
+    i = inputs or _EMPTY_ACHIEVEMENTS
+    return A.achievements(i["reigns"], i["title_days"], i["accolades"])
+
+
+def achievement_reasons(inputs: dict | None) -> list[str]:
+    i = inputs or _EMPTY_ACHIEVEMENTS
+    return A.achievement_breakdown(i["reigns"], i["title_days"], i["accolades"])
+
+
+def effective_attributes(con: sqlite3.Connection, wrestler_id: int,
+                         ach_inputs: dict | None = None) -> dict:
+    """The five ratings for one wrestler. Override wins, derived is the fallback.
+
+    Two of the five are not simply read:
+
+      wrestling      the stored base PLUS a live swing from her save win/loss
+                     record, so form shows up without a booked squash run being
+                     mistaken for ability.
+      achievements   computed from the save's title reigns and accolades. Zero
+                     until she wins something.
+
+    `ach_inputs` lets a caller that already ran `achievement_inputs()` pass the
+    row in rather than re-querying — that is the difference between one query and
+    two per wrestler in the sim's inner loops.
+    """
     row = con.execute(
         """
         SELECT
-          COALESCE(o.charisma,   a.charisma)   AS charisma,
+          COALESCE(o.wrestling,  a.wrestling)  AS wrestling_base,
           COALESCE(o.popularity, a.popularity) AS popularity,
           COALESCE(o.looks,      a.looks)      AS looks,
+          COALESCE(o.personal,   a.personal)   AS personal,
           COALESCE(o.age_at_reset, w.age_at_reset) AS age,
-          COALESCE(o.experience, NULL)         AS experience_override,
           COALESCE(o.alignment,  a.alignment)  AS alignment,
           COALESCE(o.personality, a.personality) AS personality,
-          COALESCE(s.sim_matches, 0)           AS sim_matches
+          COALESCE(s.sim_matches, 0)           AS sim_matches,
+          COALESCE(s.sim_wins, 0)              AS sim_wins
         FROM wrestler w
         JOIN attributes a         ON a.wrestler_id = w.id
         LEFT JOIN attribute_override o ON o.wrestler_id = w.id
@@ -200,12 +284,27 @@ def effective_attributes(con: sqlite3.Connection, wrestler_id: int) -> dict:
         raise ValueError(f"no such wrestler: {wrestler_id}")
 
     d = dict(row)
-    exp = d["experience_override"]
-    if exp is None:
-        exp = A.experience_from_sim(d["sim_matches"])
-    d["experience"] = exp
-    d["overall"] = A.overall(exp, d["charisma"], d["popularity"], d["looks"])
-    d["value"] = A.contract_value(exp, d["charisma"], d["popularity"], d["looks"], d["age"])
+    if ach_inputs is None:
+        ach_inputs = achievement_inputs(con).get(wrestler_id)
+    return with_derived(d, ach_inputs)
+
+
+def with_derived(d: dict, ach_inputs: dict | None) -> dict:
+    """Finish a half-built attribute row: the two live categories, then totals.
+
+    Split out of effective_attributes so the bulk roster query can share exactly
+    this arithmetic instead of reimplementing it — the old duplicate in main.py
+    was the reason a rating could read one way on the roster page and another on
+    the wrestler panel.
+    """
+    d["wrestling"] = A.wrestling_live(d["wrestling_base"], d["sim_wins"], d["sim_matches"])
+    d["record_swing"] = round(A.record_swing(d["sim_wins"], d["sim_matches"]), 1)
+    d["achievements"] = achievement_score(ach_inputs)
+    d["achievement_reasons"] = achievement_reasons(ach_inputs)
+    d["overall"] = A.overall(d["wrestling"], d["achievements"], d["popularity"],
+                             d["looks"], d["personal"])
+    d["value"] = A.contract_value(d["wrestling"], d["achievements"], d["popularity"],
+                                  d["looks"], d["personal"], d["age"])
     return d
 
 
@@ -812,8 +911,9 @@ def trade_offers(con: sqlite3.Connection, status: str | None = "pending") -> lis
                WHERE a.offer_id=?""", (o["id"],))]
         for a in assets:
             if a["kind"] == "wrestler" and a["wrestler_id"]:
-                a["value"] = asking_price(con, a["wrestler_id"])
-                a["overall"] = effective_attributes(con, a["wrestler_id"])["overall"]
+                eff = effective_attributes(con, a["wrestler_id"], ach.get(a["wrestler_id"]))
+                a["value"] = eff["value"]
+                a["overall"] = eff["overall"]
         out.append({**dict(o), "assets": assets})
     return out
 
@@ -1008,10 +1108,17 @@ def draft_years(tier: str) -> int:
 
 
 def manager_price(con: sqlite3.Connection, wrestler_id: int) -> int:
-    """A manager is bought on presence, not workrate — charisma and popularity
-    carry almost all the weight, and experience none at all."""
+    """A manager is bought on presence, not workrate.
+
+    Popularity carries most of it — promo skill is one of its components, and
+    talking is most of the job. Achievements counts for a manager the way it does
+    for a wrestler: a valet who has guided somebody to a belt is a known
+    quantity. WRESTLING IS ABSENT ENTIRELY, which is the whole point of pricing
+    managers separately: nobody hires Sunny to work a twenty-minute match.
+    """
     a = effective_attributes(con, wrestler_id)
-    presence = (a["charisma"] * 0.55 + a["popularity"] * 0.35 + a["looks"] * 0.10) / A.CAT_MAX
+    presence = (a["popularity"] * 0.50 + a["looks"] * 0.20
+                + a["achievements"] * 0.18 + a["personal"] * 0.12) / A.CAT_MAX
     raw = A.BASE_VALUE * MANAGER_PAY_FACTOR * (presence ** 1.5) * A.age_multiplier(a["age"])
     return max(MANAGER_MIN_VALUE, int(round(raw / 5_000) * 5_000))
 
@@ -1720,12 +1827,16 @@ def propose_ai_pick(con: sqlite3.Connection) -> dict:
 
     fin = {f["brand_id"]: f for f in brand_finances(con, season)}[ai]
     factor = oc["tier_factor"]
+    ach = achievement_inputs(con)
     best = None
     for wid in board["available"]:
-        base = manager_price(con, wid) if kind == "manager" else effective_attributes(con, wid)["value"]
+        # One read per wrestler, not two: the draft board can be 250 long and the
+        # value and the overall come out of the same call.
+        eff = effective_attributes(con, wid, ach.get(wid))
+        base = manager_price(con, wid) if kind == "manager" else eff["value"]
         price = max(A.MIN_VALUE, int(round(base * factor / 10_000) * 10_000))
         if price <= fin["available"]:
-            ov = effective_attributes(con, wid)["overall"]
+            ov = eff["overall"]
             if best is None or ov > best[1]:
                 best = (wid, ov, price)
     if not best:
@@ -1804,18 +1915,23 @@ def propose_ai_trade(con: sqlite3.Connection) -> dict:
     human = "SMACKDOWN" if ai == "RAW" else "RAW"
     season = con.execute("SELECT season_year FROM game_state WHERE id=1").fetchone()["season_year"]
 
+    ach = achievement_inputs(con)
+
+    def value_of(w):
+        return effective_attributes(con, w, ach.get(w))["value"]
+
     def roster(b):
         ids = [r[0] for r in con.execute(
             """SELECT wrestler_id FROM contract WHERE brand_id=? AND terminated_on IS NULL
                AND start_year<=? AND end_year>=? AND role='wrestler'""", (b, season, season))]
-        return sorted(ids, key=lambda w: effective_attributes(con, w)["value"])
+        return sorted(ids, key=value_of)
 
     a_ros, h_ros = roster(ai), roster(human)
     if len(a_ros) < 3 or len(h_ros) < 3:
         raise SigningError("not enough signed wrestlers on both brands for a trade")
     give = a_ros[len(a_ros) // 2]
-    gv = effective_attributes(con, give)["value"]
-    want = min(h_ros, key=lambda w: abs(effective_attributes(con, w)["value"] - gv))
+    gv = value_of(give)
+    want = min(h_ros, key=lambda w: abs(value_of(w) - gv))
     assets = [{"side": ai, "kind": "wrestler", "wrestler_id": give},
               {"side": human, "kind": "wrestler", "wrestler_id": want}]
     offer = propose_trade(con, ai, human, assets, note=f"{ai} (AI) proposes a swap")

@@ -60,12 +60,18 @@ CREATE TABLE IF NOT EXISTS title_reign (
 );
 
 -- Derived from source by attributes.py. Rebuilt on every normalize run.
--- experience is NOT here — it is game state, earned in the sim.
+--
+-- Only the STORED half of the rating system lives here. Achievements is absent
+-- on purpose: it is computed from this save's championships and accolades on
+-- every read, and a stored copy would go stale the moment a belt changed hands
+-- and then contradict the trophy cabinet next to it. The live win/loss swing on
+-- top of `wrestling` is computed the same way, for the same reason.
 CREATE TABLE IF NOT EXISTS attributes (
     wrestler_id   INTEGER PRIMARY KEY REFERENCES wrestler(id),
-    charisma      INTEGER NOT NULL,
-    popularity    INTEGER NOT NULL,
-    looks         INTEGER NOT NULL,
+    wrestling     INTEGER NOT NULL,         -- in-ring ability, 0-20 (base only)
+    popularity    INTEGER NOT NULL,         -- score + reach + promo, 0-20
+    looks         INTEGER NOT NULL,         -- 0-20, seeded then hand-edited
+    personal      INTEGER NOT NULL DEFAULT 10,  -- 0-20, yours alone
     availability  TEXT NOT NULL,            -- active_2000 | legend | import
     role          TEXT NOT NULL DEFAULT 'wrestler',  -- wrestler | manager | both
     role_source   TEXT,                     -- the raw cagematch Roles string
@@ -90,12 +96,20 @@ CREATE TABLE IF NOT EXISTS excluded_wrestler (
 
 -- Any column you edit by hand. NULL means "use the derived value".
 -- normalize.py must never DELETE or UPDATE this table.
+--
+-- `experience` and `charisma` are RETIRED columns, kept so that old saves open
+-- without a rewrite. Experience stopped being a category when Wrestling took
+-- over in-ring ability; charisma was folded into Popularity as its promo
+-- component. Nothing reads either one — see migrate_ratings.py, which carried
+-- their values across.
 CREATE TABLE IF NOT EXISTS attribute_override (
     wrestler_id   INTEGER PRIMARY KEY REFERENCES wrestler(id),
-    experience    INTEGER,
-    charisma      INTEGER,
+    wrestling     INTEGER,
     popularity    INTEGER,
     looks         INTEGER,
+    personal      INTEGER,
+    experience    INTEGER,                  -- retired
+    charisma      INTEGER,                  -- retired
     age_at_reset  INTEGER,
     role          TEXT,                     -- wrestler | manager | both
     alignment     TEXT,                     -- face | heel

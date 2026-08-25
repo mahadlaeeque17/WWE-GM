@@ -63,10 +63,11 @@ export default function FreeAgentsTab({ roster }: { roster: RosterRow[] }) {
           <tr className="text-[10px] uppercase tracking-wider text-slate-500">
             <th className="text-left font-medium px-3 py-2">Wrestler</th>
             <th className="text-right font-medium px-2 py-2">Age</th>
-            <th className="text-right font-medium px-2 py-2">EXP</th>
-            <th className="text-right font-medium px-2 py-2">CHA</th>
-            <th className="text-right font-medium px-2 py-2">POP</th>
-            <th className="text-right font-medium px-2 py-2">LKS</th>
+            <th className="text-right font-medium px-2 py-2" title="Wrestling — in-ring ability, moved by her win/loss record">WRS</th>
+            <th className="text-right font-medium px-2 py-2" title="Achievements — what she has won in THIS save. Starts at 0">ACH</th>
+            <th className="text-right font-medium px-2 py-2" title="Popularity — cagematch score, reach and promo skill">POP</th>
+            <th className="text-right font-medium px-2 py-2" title="Looks — yours to set">LKS</th>
+            <th className="text-right font-medium px-2 py-2" title="Personal — yours alone">PER</th>
             <th className="text-right font-medium px-2 py-2">OVR</th>
             <th className="text-right font-medium px-3 py-2">~Asking</th>
             <th className="px-3 py-2" />
@@ -82,10 +83,11 @@ export default function FreeAgentsTab({ roster }: { roster: RosterRow[] }) {
                 </div>
               </td>
               <td className="px-2 py-1.5 text-right tnum text-slate-400">{ageLabel(r.age, r.age_precision)}</td>
-              <StatCell v={r.experience} />
-              <StatCell v={r.charisma} />
+              <StatCell v={r.wrestling} swing={r.record_swing} />
+              <StatCell v={r.achievements} title={r.achievement_reasons.join(" · ") || "Nothing won yet in this save"} />
               <StatCell v={r.popularity} />
               <StatCell v={r.looks} />
+              <StatCell v={r.personal} />
               <td className="px-2 py-1.5 text-right tnum text-gold font-semibold">{r.overall}</td>
               <td className="px-3 py-1.5 text-right tnum text-slate-400">~{money(r.value)}</td>
               <td className="px-3 py-1.5 text-right">
