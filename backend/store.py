@@ -56,10 +56,15 @@ BLOB_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "")
 MODE = (os.environ.get("GM2000_STORE")
         or ("blob" if BLOB_TOKEN else "disk")).strip().lower()
 BLOB_KEY = os.environ.get("GM2000_BLOB_KEY", "gm2000.db")
-BLOB_API = "https://blob.vercel-storage.com"
-# Overridable without a code change: if Vercel moves the API forward and starts
-# rejecting this version, it can be corrected from the dashboard.
-BLOB_API_VERSION = os.environ.get("GM2000_BLOB_API_VERSION", "7")
+# Overridable for the same reason the real client allows VERCEL_BLOB_API_URL:
+# it lets the request SHAPE be asserted against a local stub, which is how the
+# pathname-in-the-query bug is now caught without a token or a deploy.
+BLOB_API = os.environ.get("GM2000_BLOB_API", "https://blob.vercel-storage.com")
+# 12 is what @vercel/blob 2.8.0 sends. It matters: private stores did not exist
+# when v7 was current, so asking for private access on v7 is a contradiction the
+# server resolves by ignoring the request. Overridable without a code change, so
+# a future bump can be corrected from the dashboard.
+BLOB_API_VERSION = os.environ.get("GM2000_BLOB_API_VERSION", "12")
 
 # Where `dir` mode keeps its copy.
 REMOTE_DIR = os.environ.get("GM2000_REMOTE_DIR", "")
@@ -170,10 +175,58 @@ def _dir_put(data: bytes) -> None:
 
 
 # --------------------------------------------------------------- blob backend
+#
+# THE PROTOCOL, read out of the official @vercel/blob client (v2.8.0) rather
+# than guessed. Every earlier attempt here failed on the same wrong assumption,
+# so the shape is written down in full:
+#
+#   upload    PUT  https://blob.vercel-storage.com/?pathname=<urlencoded>
+#   list      GET  https://blob.vercel-storage.com/?prefix=<p>&limit=<n>
+#   download  GET  https://<storeId>.<access>.blob.vercel-storage.com/<pathname>
+#
+# The pathname goes in the QUERY STRING, not the path. That one detail was the
+# whole bug. `PUT /gm2000.db` is an older route that never reads
+# x-vercel-blob-access, so the server saw no access header at all, assumed
+# public, and a private store refused it — reporting "cannot use public access
+# on a private store" while the request had in fact asked for private. The
+# message described the server's own default, not what was sent, which is why
+# guessing header names could never fix it.
+#
+# Common headers on every API call:
+#   authorization             Bearer <token>
+#   x-api-version             12   (v7 predates private stores entirely)
+#   x-vercel-blob-store-id    the store id, parsed out of the token
+#
+# Upload-only headers:
+#   x-vercel-blob-access      private | public — must match the store
+#   x-allow-overwrite         "1"; the save is rewritten at the same key forever
+#   x-add-random-suffix       "0"; a suffix would orphan the previous save
+#   x-content-type            application/octet-stream
 
-def _blob_headers(version: str | None = None) -> dict:
-    return {"authorization": f"Bearer {BLOB_TOKEN}",
-            "x-api-version": version or BLOB_API_VERSION}
+from urllib.parse import quote
+
+BLOB_ACCESS = os.environ.get("GM2000_BLOB_ACCESS", "private").strip().lower()
+
+_good_variant: str | None = None
+
+
+def _store_id() -> str:
+    """The store id, which the API wants as its own header.
+
+    A read-write token is `vercel_blob_rw_<storeId>_<secret>`, so the id is the
+    fourth underscore-separated field. Parsed rather than configured, because it
+    is already sitting in the token that every deploy has.
+    """
+    parts = BLOB_TOKEN.split("_")
+    return parts[3] if len(parts) > 4 else ""
+
+
+def _blob_headers() -> dict:
+    h = {"authorization": f"Bearer {BLOB_TOKEN}", "x-api-version": BLOB_API_VERSION}
+    sid = _store_id()
+    if sid:
+        h["x-vercel-blob-store-id"] = sid
+    return h
 
 
 def _blob_raise(r: httpx.Response, what: str) -> None:
@@ -181,9 +234,8 @@ def _blob_raise(r: httpx.Response, what: str) -> None:
 
     Vercel Blob explains a rejection in the body — `{"error":{"code":...}}` —
     and httpx's raise_for_status throws that away. A bare "400 Bad Request" from
-    a host you cannot attach a debugger to is close to useless; the body names
-    the offending header. The token is never echoed back, so this is safe to
-    surface on /api/store/status.
+    a host you cannot attach a debugger to is close to useless. The token is
+    never echoed back, so this is safe to surface on /api/store/status.
     """
     if r.status_code < 400:
         return
@@ -195,13 +247,33 @@ def _blob_raise(r: httpx.Response, what: str) -> None:
     raise RuntimeError(f"{what}: HTTP {r.status_code} — {body or '(empty body)'}")
 
 
-def _blob_url() -> str | None:
-    """Find the save's URL by listing the store.
+def _direct_url(access: str) -> str | None:
+    """The blob's own URL, built from the store id — no lookup needed.
 
-    The URL is not derivable from the key alone — Vercel prefixes it with the
-    store id — and a fresh container has no memory of the last upload, so it has
-    to be looked up rather than cached. `downloadUrl` is preferred where the API
-    returns one, since that is the form a private store expects.
+    `https://<storeId>.<access>.blob.vercel-storage.com/<pathname>` is exactly
+    what the client constructs, which means the list-then-fetch round trip this
+    used to do on every cold boot was avoidable.
+
+    `?cache=0` on a private store is not an optimisation, it is REQUIRED FOR
+    CORRECTNESS. Blob reads are CDN-cached and this one key is overwritten after
+    every single write, so a cached response means booting into a save that is
+    minutes or hours stale and then persisting it back over the good one. Only
+    private stores accept the parameter, which is the strongest reason to keep
+    the store private rather than public.
+    """
+    sid = _store_id()
+    if not sid:
+        return None
+    url = f"https://{sid}.{access}.blob.vercel-storage.com/{quote(BLOB_KEY)}"
+    return f"{url}?cache=0" if access == "private" else url
+
+
+def _blob_url() -> str | None:
+    """Fallback lookup: ask the store what the save's URL is.
+
+    Only reached if the token could not be parsed for a store id, which should
+    not happen — but a listing failure carries a readable error, whereas a bad
+    guess at a hostname just times out.
     """
     r = httpx.get(BLOB_API, headers=_blob_headers(), timeout=TIMEOUT,
                   params={"prefix": BLOB_KEY, "limit": "1"})
@@ -217,58 +289,38 @@ def _blob_url() -> str | None:
 def _blob_get() -> bytes | None:
     """Download the save, working with either a PRIVATE or a PUBLIC store.
 
-    A public blob is readable by plain GET; a private one requires the store
-    token. Rather than making the deploy depend on the operator having picked
-    the option this code happens to assume, try authenticated first and fall
-    back — the token only ever goes to Vercel's own storage domain.
+    The store's access mode is picked in the dashboard and the app cannot read
+    it, so both hostnames are tried — starting with whichever an upload has
+    already been accepted under, if one has. A 404 from both means "no save in
+    the store yet", which is a normal first boot rather than an error.
     """
-    url = _blob_url()
-    if not url:
-        return None
+    order = [_good_variant or BLOB_ACCESS]
+    order.append("public" if order[0] == "private" else "private")
 
-    attempts = [_blob_headers(), {}] if _is_blob_host(url) else [{}]
     last = None
-    for headers in attempts:
-        r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True, headers=headers)
-        if r.status_code == 404:
-            return None
+    for access in order:
+        url = _direct_url(access)
+        if not url:
+            break
+        r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True,
+                      headers={"authorization": f"Bearer {BLOB_TOKEN}"})
         if r.status_code < 400:
             return r.content
-        last = r
+        if r.status_code != 404:
+            last = r
+
+    url = _blob_url()
+    if url:
+        r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True,
+                      headers={"authorization": f"Bearer {BLOB_TOKEN}"})
+        if r.status_code < 400:
+            return r.content
+        if r.status_code != 404:
+            last = r
+
     if last is not None:
         _blob_raise(last, "download")
     return None
-
-
-def _is_blob_host(url: str) -> bool:
-    """Only ever attach the token to Vercel's own storage domains."""
-    from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "").lower()
-    return host.endswith("vercel-storage.com") or host.endswith("vercel.app")
-
-
-# Upload headers, taken from the official @vercel/blob client rather than
-# guessed. The relevant lines of its put() are:
-#
-#     headers["x-vercel-blob-access"] = options.access
-#     headers["x-add-random-suffix"]  = addRandomSuffix ? "1" : "0"
-#     headers["x-allow-overwrite"]    = allowOverwrite  ? "1" : "0"
-#     headers["x-content-type"]       = contentType
-#
-# The access header is `x-vercel-blob-access`, NOT `x-access`. Sending the wrong
-# name meant the server saw no access at all, defaulted to public, and refused
-# it against a private store — with a message that named the symptom ("cannot
-# use public access") and gave no hint that the header had simply been ignored.
-# Ten guessed combinations returned that one sentence; reading the client
-# answered it immediately, and should have been the first move.
-#
-# x-allow-overwrite is required for us specifically: the save is written to the
-# same key over and over, and without it the second write is refused because a
-# blob already exists there. x-add-random-suffix stays "0" for the same reason —
-# a suffix would put every write on a new url and orphan the previous save.
-BLOB_ACCESS = os.environ.get("GM2000_BLOB_ACCESS", "private").strip().lower()
-
-_good_variant: str | None = None
 
 
 def _put_headers(access: str) -> dict:
@@ -290,10 +342,11 @@ def _blob_put(data: bytes) -> None:
     global _good_variant
     first = _good_variant or BLOB_ACCESS
     other = "public" if first == "private" else "private"
+    url = f"{BLOB_API}/?pathname={quote(BLOB_KEY, safe='')}"
 
     for attempt, access in enumerate((first, other)):
-        r = httpx.put(f"{BLOB_API}/{BLOB_KEY}", headers=_put_headers(access),
-                      content=data, timeout=TIMEOUT)
+        r = httpx.put(url, headers=_put_headers(access), content=data,
+                      timeout=TIMEOUT)
         if r.status_code < 400:
             _good_variant = access
             return
