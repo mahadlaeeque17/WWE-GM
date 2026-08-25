@@ -32,7 +32,10 @@ data/images/inbox/*
 # boot without it. These are throwaway snapshots taken before roster batches and
 # smoke tests, and there is no reason to carry them.
 data/*.backup-*.db
-data/*.pre-batch*.db
+# Any pre-change snapshot, however it is named. This was `data/*.pre-batch*.db`,
+# which quietly let `gm2000.pre-ratings-*.db` and `gm2000.pre-2010-batch-*.db`
+# into a commit — half a megabyte each, against the intent right above.
+data/*.pre-*.db
 data/_smoke*.db
 data/*.db-wal
 data/*.db-shm
