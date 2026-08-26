@@ -339,10 +339,15 @@ from urllib.parse import quote
 
 # Which access mode to TRY FIRST. The retry in _blob_put covers the other one, so
 # this is only about not spending a guaranteed-failed request on every upload.
-# Public is the default because a store created through the dashboard's normal
-# flow is public unless you deliberately choose otherwise — but private is the
-# better choice for a save file, and _direct_url explains why.
-BLOB_ACCESS = os.environ.get("GM2000_BLOB_ACCESS", "public").strip().lower()
+#
+# PRIVATE, on evidence rather than on the badge. The dashboard labels this store
+# "Public", so the default was set to public — and the live deploy then reported
+# `put_variant: private`, meaning the public attempt was refused and the retry
+# succeeded. Whatever that badge describes, it is not what the upload API accepts.
+# One guaranteed-failed request per cold container is not free, and private is the
+# better answer anyway: it is the only mode that supports the cache-busting read
+# in _direct_url.
+BLOB_ACCESS = os.environ.get("GM2000_BLOB_ACCESS", "private").strip().lower()
 
 _good_variant: str | None = None
 
