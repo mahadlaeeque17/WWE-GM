@@ -84,8 +84,18 @@ to configure.
 
 | Var | Value | Why |
 |---|---|---|
-| `GM2000_STORE` | `blob` | **without this the save resets on every cold start** |
 | `GROQ_API_KEY` | your key | optional — only the AI commentary/promos need it |
+
+**`GM2000_STORE` is no longer needed** and this table used to insist on it. The
+app turns the Blob backend on from the presence of `BLOB_READ_WRITE_TOKEN`
+alone — which Vercel injects when you connect the store in step 1 — so the only
+thing that matters is that the store is actually connected. Setting
+`GM2000_STORE` still wins if you want to force `disk` on a host with a real
+volume.
+
+That correction matters because it moves where you look when the save is not
+persisting: it is almost never a missing variable, it is the store not being
+linked to the project.
 
 `GM2000_DATA_DIR` is set in code to `/tmp/gm2000` and needs no attention.
 
@@ -94,17 +104,65 @@ to configure.
 
 ### 4. Check it
 
-Open **`/api/store/status`** on the deployed URL. It is the first thing to look
-at if a save ever appears to reset itself:
+Live at **https://wwe-gm.vercel.app** — recorded here because it was not written
+down anywhere and had to be guessed at.
+
+Open **`/api/store/status`**. It is the first thing to look at if a save ever
+appears to reset itself:
 
 ```json
-{ "mode": "blob", "enabled": true, "configured": true,
-  "hydrated": 0.3, "error": null, "db_bytes": 536576 }
+{ "mode": "blob", "enabled": true, "configured": true, "durable": true,
+  "put_variant": "private", "hydrated": 0.3, "error": null, "db_bytes": 606208 }
 ```
 
-`"configured": false` means the Blob store is not linked. `"mode": "disk"` means
-`GM2000_STORE` was never set, and the game is running on a filesystem that will
-be thrown away.
+Read it in this order:
+
+| What you see | What it means |
+|---|---|
+| `"durable": true` | the save will survive. This is the only line that matters |
+| `"mode": "disk"` on Vercel | **no Blob store is connected** — the game is writing to a filesystem that is about to be deleted. `durable_detail` says what to do |
+| `"enabled": false` | same thing, said another way: the store backend never turned on because no token arrived |
+| `"put_variant": null` after playing | nothing has been uploaded yet. If `error` is also set, that is the upload failing |
+| `"error"` | the response body Vercel actually sent back, not just a status code |
+
+The app puts a **NOT SAVING** banner on screen whenever `durable` is false, so
+this is a confirmation rather than a discovery.
+
+### 5. Prove the Blob store works without a deploy
+
+Nine commits were once spent guessing at this from a banner. Two scripts exist so
+that never happens again:
+
+```bash
+python test_blob_shape.py
+```
+
+Asserts every Blob request against a local stub — no token, no network,
+milliseconds. Catches the class of bug that caused all nine (the pathname
+belongs in the query string, and putting it in the path silently disables the
+access header).
+
+```bash
+python smoke_blob.py
+```
+
+Full round trip against the **real** store from your laptop: list, upload,
+download, overwrite, delete. Reads `BLOB_READ_WRITE_TOKEN` from the environment
+only, never writes it anywhere, and uses a throwaway key — so it is safe to run
+while a game is in progress.
+
+```powershell
+$env:BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_..."   # Storage -> your store -> .env.local
+python smoke_blob.py
+```
+
+### 6. Upgrading an existing save
+
+Nothing to do. The API migrates the save it finds to the current rating system at
+boot and pushes the result back up — which is not a nicety: the database the
+deploy runs on is whatever is in Blob storage, not what shipped in the bundle, so
+a save uploaded before a schema change would otherwise 500 on the first request.
+Guarded by a marker, so it happens once.
 
 ---
 
