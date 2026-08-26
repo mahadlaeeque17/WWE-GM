@@ -157,21 +157,74 @@ def main() -> int:
         os.environ.pop("BLOB_READ_WRITE_TOKEN", None)
         os.environ.pop("GM2000_BLOB_TOKEN_VAR", None)
         os.environ["WWEGM_READ_WRITE_TOKEN"] = FAKE_TOKEN
-        tok, var = store._find_token()
+        tok, var = store._find_rw_token()
         ok &= check("a prefixed *_READ_WRITE_TOKEN is found",
                     tok == FAKE_TOKEN and var == "WWEGM_READ_WRITE_TOKEN",
                     f"got {var!r}")
         # Postgres and Redis integrations also inject *_READ_WRITE_TOKEN names.
         os.environ["AAA_READ_WRITE_TOKEN"] = "postgres://nope"
         ok &= check("a same-suffix variable that is not a blob token is ignored",
-                    store._find_token()[1] == "WWEGM_READ_WRITE_TOKEN",
-                    f"got {store._find_token()[1]!r}")
+                    store._find_rw_token()[1] == "WWEGM_READ_WRITE_TOKEN",
+                    f"got {store._find_rw_token()[1]!r}")
         os.environ.pop("AAA_READ_WRITE_TOKEN", None)
         os.environ["BLOB_READ_WRITE_TOKEN"] = FAKE_TOKEN
         ok &= check("the conventional name still wins when both exist",
-                    store._find_token()[1] == "BLOB_READ_WRITE_TOKEN")
+                    store._find_rw_token()[1] == "BLOB_READ_WRITE_TOKEN")
     finally:
         for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    print("\nOIDC auth — what a dashboard-connected store actually uses")
+    # A store connected through the dashboard now injects only *_STORE_ID and a
+    # webhook key. There is NO read-write token, and the credential arrives per
+    # request in an x-vercel-oidc-token header. This is the path that "I connected
+    # the blob and it still does not save" turned out to need.
+    saved2 = {k: os.environ.get(k) for k in
+              ("BLOB_READ_WRITE_TOKEN", "GM2000_BLOB_TOKEN_VAR",
+               "WWEGM_STORE_ID", "VERCEL_OIDC_TOKEN")}
+    try:
+        os.environ.pop("BLOB_READ_WRITE_TOKEN", None)
+        os.environ.pop("GM2000_BLOB_TOKEN_VAR", None)
+        os.environ.pop("VERCEL_OIDC_TOKEN", None)
+        os.environ["WWEGM_STORE_ID"] = "store_o5dbCMspkhnu34BA"
+
+        store.use_request_token(None)
+        ok &= check("with a store id but no token yet, there is no credential",
+                    store.credentials()["kind"] == "",
+                    f"got {store.credentials()['kind']!r}")
+
+        store.use_request_token("eyJhbGciOi.OIDC.sig")
+        cred = store.credentials()
+        ok &= check("a request header plus a store id authenticates by OIDC",
+                    cred["kind"] == "oidc", f"got {cred['kind']!r}")
+        # Vercel writes it as store_xxx; the API wants it bare.
+        ok &= check("the store_ prefix is stripped off the id",
+                    cred["store_id"] == "o5dbCMspkhnu34BA", f"got {cred['store_id']!r}")
+        h = store._blob_headers()
+        ok &= check("OIDC sends the token as the bearer",
+                    h["authorization"] == "Bearer eyJhbGciOi.OIDC.sig")
+        ok &= check("OIDC MUST send the store id — it is not in the token",
+                    h.get("x-vercel-blob-store-id") == "o5dbCMspkhnu34BA",
+                    f"got {h.get('x-vercel-blob-store-id')!r}")
+
+        # The token is short-lived, so it must not outlive the request that
+        # brought it — a cached one expires and the save starts failing mid-session.
+        store.use_request_token(None)
+        ok &= check("the token does not outlive its request",
+                    store.credentials()["kind"] == "",
+                    f"got {store.credentials()['kind']!r}")
+
+        # And a real read-write token still wins where one exists.
+        os.environ["BLOB_READ_WRITE_TOKEN"] = FAKE_TOKEN
+        store.use_request_token("eyJhbGciOi.OIDC.sig")
+        ok &= check("a read-write token takes precedence over OIDC",
+                    store.credentials()["kind"] == "rw")
+    finally:
+        store.use_request_token(None)
+        for k, v in saved2.items():
             if v is None:
                 os.environ.pop(k, None)
             else:

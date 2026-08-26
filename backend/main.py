@@ -61,6 +61,14 @@ async def _persist_writes(request, call_next):
     it cannot change anything; a failed request is skipped because there is
     nothing worth saving. A no-op unless GM2000_STORE is set.
     """
+    # Hand this request's OIDC token to the store layer BEFORE anything runs.
+    #
+    # A Blob store connected through the dashboard authenticates by OIDC, and the
+    # token arrives per request in this header — it is short-lived, so it cannot
+    # be read once at cold start. Miss this and the save silently stops working
+    # part-way through a session, or never works at all.
+    store.use_request_token(request.headers.get("x-vercel-oidc-token"))
+
     response = await call_next(request)
     if (store.enabled() and request.method != "GET"
             and request.url.path.startswith("/api/")
@@ -98,6 +106,12 @@ def current_state(c: sqlite3.Connection) -> sqlite3.Row | None:
 _READY = False
 _READY_LOG: list[str] = []
 
+# How many times readiness may defer itself waiting for a blob credential. The
+# first real request supplies one, so this only ever burns through when the store
+# genuinely is not connected — at which point booting without it beats not booting.
+_READY_ATTEMPTS = 0
+MAX_READY_ATTEMPTS = 3
+
 
 def ensure_ready() -> None:
     """Put the save in place and bring the schema up to date. Runs ONCE.
@@ -110,6 +124,27 @@ def ensure_ready() -> None:
     global _READY
     if _READY:
         return
+
+    # WAIT FOR A CREDENTIAL BEFORE HYDRATING, when the store needs one.
+    #
+    # Under OIDC the token arrives in a request header, so at startup-event time
+    # there is nothing to authenticate with. Hydrating anyway would pull nothing,
+    # fall back to the bundled seed, and — because readiness is a one-shot flag —
+    # never try again: the container would serve a fresh roster for its whole life
+    # and then persist that over the real save. So this returns WITHOUT latching,
+    # and the first actual request (which does carry the header) runs it properly.
+    #
+    # Bounded, because a genuinely missing credential must not retry forever: after
+    # a few attempts it gives up and runs on the local file, which at least boots
+    # and shows the NOT SAVING banner.
+    global _READY_ATTEMPTS
+    if store.enabled() and not store.credentials()["kind"]:
+        _READY_ATTEMPTS += 1
+        if _READY_ATTEMPTS <= MAX_READY_ATTEMPTS:
+            return
+        _READY_LOG.append("no blob credential after "
+                          f"{MAX_READY_ATTEMPTS} attempts — running on the local file")
+
     _READY = True                      # set first: a failure must not retry forever
     try:
         seeded = paths.seed_data_dir()

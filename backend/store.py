@@ -42,25 +42,54 @@ from pathlib import Path
 
 import httpx
 
-# Find the store token, whatever Vercel decided to call it.
+# ------------------------------------------------------------- CREDENTIALS
 #
-# THE DEFAULT NAME IS NOT THE ONLY NAME. Vercel injects `BLOB_READ_WRITE_TOKEN`
-# only for a store created with the default name; name your store `WWEGM` and the
-# variables arrive prefixed — `WWEGM_READ_WRITE_TOKEN`, `WWEGM_STORE_ID`. Reading
-# just the default name meant a correctly created, correctly connected store still
-# presented as "no Blob store linked", which is indistinguishable from having
-# forgotten to connect it — and sends you to the wrong part of the dashboard.
+# THERE ARE TWO WAYS TO AUTHENTICATE, and a modern store only offers the second.
 #
-# So: take an explicit override, then the conventional name, then ANY variable
-# ending `_READ_WRITE_TOKEN` whose value actually looks like a blob token. That
-# last rule is what makes the app work regardless of what the store is called,
-# without anyone having to know this quirk exists.
+#   read-write token   a long-lived `vercel_blob_rw_...` string in the
+#                      environment. What every tutorial shows. Vercel calls it
+#                      `BLOB_READ_WRITE_TOKEN` for a default-named store, and
+#                      `WWEGM_READ_WRITE_TOKEN` for one named WWEGM.
+#
+#   OIDC               what a store connected through the dashboard uses NOW.
+#                      Vercel injects only `WWEGM_STORE_ID` and a
+#                      `WWEGM_WEBHOOK_PUBLIC_KEY`, and authenticates each request
+#                      with a SHORT-LIVED OIDC token. There is no read-write
+#                      token in the environment at all.
+#
+# This is what "I connected the blob and redeployed and it still does not save"
+# turned out to be: the store was connected correctly, and the app was looking
+# for a credential the platform had stopped issuing.
+#
+# TWO CONSEQUENCES WORTH SPELLING OUT.
+#
+# 1. The OIDC token arrives PER REQUEST, in the `x-vercel-oidc-token` header —
+#    `VERCEL_OIDC_TOKEN` in the environment is the local-dev fallback. So the
+#    credential cannot be read once at import: a token captured at cold start
+#    expires while the container is still alive, and the save would start
+#    failing part-way through a session. `main.py` feeds each request's header
+#    to `use_request_token`, and everything here resolves credentials lazily.
+#
+# 2. Under OIDC the store id CANNOT be parsed out of the token — it comes from
+#    the environment instead, which is why `*_STORE_ID` is discovered the same
+#    forgiving way the token name is.
 TOKEN_SUFFIX = "_READ_WRITE_TOKEN"
 TOKEN_PREFIX = "vercel_blob_rw_"
+STORE_ID_SUFFIX = "_STORE_ID"
+
+# The current request's OIDC token. Set by the middleware, read by the next
+# outbound blob call — never cached beyond the request that supplied it.
+_request_oidc: str = ""
 
 
-def _find_token() -> tuple[str, str]:
-    """(token, which env var it came from). Empty strings if there is none."""
+def use_request_token(token: str | None) -> None:
+    """Hand this request's `x-vercel-oidc-token` to the store layer."""
+    global _request_oidc
+    _request_oidc = (token or "").strip()
+
+
+def _find_rw_token() -> tuple[str, str]:
+    """A long-lived read-write token, and which variable held it."""
     explicit = os.environ.get("GM2000_BLOB_TOKEN_VAR", "").strip()
     if explicit:
         return os.environ.get(explicit, ""), explicit
@@ -73,7 +102,65 @@ def _find_token() -> tuple[str, str]:
     return "", ""
 
 
-BLOB_TOKEN, BLOB_TOKEN_VAR = _find_token()
+def _find_store_id() -> tuple[str, str]:
+    """The store id from the environment, and which variable held it.
+
+    Vercel writes it as `store_xxxxx`; the API wants it bare, so the prefix is
+    stripped exactly as the official client does.
+    """
+    def clean(v: str) -> str:
+        v = v.strip()
+        return v[len("store_"):] if v.startswith("store_") else v
+
+    explicit = os.environ.get("GM2000_BLOB_STORE_ID", "").strip()
+    if explicit:
+        return clean(explicit), "GM2000_BLOB_STORE_ID"
+    if os.environ.get("BLOB_STORE_ID"):
+        return clean(os.environ["BLOB_STORE_ID"]), "BLOB_STORE_ID"
+    for name in sorted(os.environ):
+        if name.endswith(STORE_ID_SUFFIX) and os.environ[name].strip():
+            return clean(os.environ[name]), name
+    return "", ""
+
+
+def _oidc_token() -> str:
+    """This request's OIDC token, else the environment's (local dev)."""
+    return _request_oidc or os.environ.get("VERCEL_OIDC_TOKEN", "").strip()
+
+
+def credentials() -> dict:
+    """How this process can talk to the store, resolved fresh every time.
+
+    Returns `kind` of "rw", "oidc" or "" — and the store id, which both paths
+    need as a header.
+    """
+    rw, rw_var = _find_rw_token()
+    env_id, id_var = _find_store_id()
+    if rw:
+        # vercel_blob_rw_<storeId>_<secret> — the id is the fourth field.
+        parts = rw.split("_")
+        parsed = parts[3] if len(parts) > 4 else ""
+        return {"kind": "rw", "token": rw, "token_var": rw_var,
+                "store_id": parsed or env_id, "store_id_var": id_var}
+    oidc = _oidc_token()
+    if oidc and env_id:
+        return {"kind": "oidc", "token": oidc,
+                "token_var": "x-vercel-oidc-token" if _request_oidc else "VERCEL_OIDC_TOKEN",
+                "store_id": env_id, "store_id_var": id_var}
+    return {"kind": "", "token": "", "token_var": "",
+            "store_id": env_id, "store_id_var": id_var}
+
+
+# Whether a blob credential is POSSIBLE, decided at import because it selects the
+# backend. A read-write token is proof on its own; for OIDC the store id is the
+# stable signal — the token itself only shows up once a request is in flight, so
+# waiting for one would leave the app on the throwaway filesystem for the whole
+# of the first request.
+_RW_TOKEN, _RW_VAR = _find_rw_token()
+_STORE_ID, _STORE_ID_VAR = _find_store_id()
+BLOB_TOKEN = _RW_TOKEN
+BLOB_TOKEN_VAR = _RW_VAR or (_STORE_ID_VAR if _STORE_ID else "")
+BLOB_CREDENTIAL_POSSIBLE = bool(_RW_TOKEN or _STORE_ID)
 
 # If a Blob store is linked, USE IT — do not also demand GM2000_STORE=blob.
 #
@@ -84,7 +171,7 @@ BLOB_TOKEN, BLOB_TOKEN_VAR = _find_token()
 # enough. Setting GM2000_STORE explicitly still wins, so `disk` remains a way to
 # opt out on a host that has a real volume.
 MODE = (os.environ.get("GM2000_STORE")
-        or ("blob" if BLOB_TOKEN else "disk")).strip().lower()
+        or ("blob" if BLOB_CREDENTIAL_POSSIBLE else "disk")).strip().lower()
 BLOB_KEY = os.environ.get("GM2000_BLOB_KEY", "gm2000.db")
 # Overridable for the same reason the real client allows VERCEL_BLOB_API_URL:
 # it lets the request SHAPE be asserted against a local stub, which is how the
@@ -166,7 +253,9 @@ def status() -> dict:
         # The NAME of the variable the token came from, never the token. Which
         # variable was found is the single most useful thing when a correctly
         # created store still reports as missing.
-        "token_var": BLOB_TOKEN_VAR or None,
+        "auth": credentials()["kind"] or None,
+        "token_var": credentials()["token_var"] or None,
+        "store_id_var": _STORE_ID_VAR or None,
         "put_variant": put_variant(),
         **_last,
     }
@@ -180,11 +269,19 @@ def _configured() -> tuple[bool, str]:
             return False, "GM2000_REMOTE_DIR is not set"
         return True, f"directory {REMOTE_DIR}"
     if MODE == "blob":
-        if not BLOB_TOKEN:
-            return False, ("no blob token in the environment — connect the Blob "
-                           "store to this project, then redeploy. Looked for "
-                           "BLOB_READ_WRITE_TOKEN and any *_READ_WRITE_TOKEN")
-        return True, f"Vercel Blob key {BLOB_KEY} via {BLOB_TOKEN_VAR}"
+        cred = credentials()
+        if not cred["kind"]:
+            if cred["store_id"]:
+                # The store IS connected — this is the OIDC case with no token in
+                # flight yet, which is normal outside a request.
+                return True, (f"Vercel Blob key {BLOB_KEY} via OIDC "
+                              f"(store id from {cred['store_id_var']})")
+            return False, ("no blob credential — connect the Blob store to this "
+                           "project, then redeploy. Looked for a "
+                           "*_READ_WRITE_TOKEN, and for OIDC a *_STORE_ID plus "
+                           "an x-vercel-oidc-token header")
+        return True, (f"Vercel Blob key {BLOB_KEY} via {cred['kind']}"
+                      f" ({cred['token_var']})")
     return False, f"unknown GM2000_STORE mode {MODE!r}"
 
 
@@ -253,19 +350,20 @@ _good_variant: str | None = None
 def _store_id() -> str:
     """The store id, which the API wants as its own header.
 
-    A read-write token is `vercel_blob_rw_<storeId>_<secret>`, so the id is the
-    fourth underscore-separated field. Parsed rather than configured, because it
-    is already sitting in the token that every deploy has.
+    From the read-write token where there is one (it is the fourth
+    underscore-separated field of `vercel_blob_rw_<storeId>_<secret>`), and from
+    the environment under OIDC, where the token carries no store id at all.
     """
-    parts = BLOB_TOKEN.split("_")
-    return parts[3] if len(parts) > 4 else ""
+    return credentials()["store_id"]
 
 
 def _blob_headers() -> dict:
-    h = {"authorization": f"Bearer {BLOB_TOKEN}", "x-api-version": BLOB_API_VERSION}
-    sid = _store_id()
-    if sid:
-        h["x-vercel-blob-store-id"] = sid
+    cred = credentials()
+    h = {"authorization": f"Bearer {cred['token']}", "x-api-version": BLOB_API_VERSION}
+    # Required under OIDC — the store id is not in the token, so without this
+    # header the API has no idea which store is being addressed.
+    if cred["store_id"]:
+        h["x-vercel-blob-store-id"] = cred["store_id"]
     return h
 
 
@@ -386,7 +484,7 @@ def _blob_get() -> bytes | None:
         if not url:
             continue
         r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True,
-                      headers={"authorization": f"Bearer {BLOB_TOKEN}"})
+                      headers={"authorization": f"Bearer {credentials()['token']}"})
         if r.status_code < 400:
             return r.content
         if r.status_code != 404:
@@ -395,7 +493,7 @@ def _blob_get() -> bytes | None:
     url = _blob_url()
     if url:
         r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True,
-                      headers={"authorization": f"Bearer {BLOB_TOKEN}"})
+                      headers={"authorization": f"Bearer {credentials()['token']}"})
         if r.status_code < 400:
             return r.content
         if r.status_code != 404:
