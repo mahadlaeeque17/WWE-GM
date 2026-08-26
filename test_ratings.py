@@ -20,6 +20,11 @@ What it checks, and why each one is here rather than assumed:
                  rather than discovering two seasons in.
   no leakage     nothing anywhere still reads the retired `charisma` /
                  `experience` categories.
+  deploy path    an OLD-SCHEMA save upgrades itself at boot. This is the one
+                 that only bites in production: a stateless host pulls its save
+                 down from Blob storage, so the database the app opens can
+                 predate the whole rating change, and the first roster request
+                 dies on a missing column.
 """
 from __future__ import annotations
 
@@ -37,6 +42,7 @@ sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "harvester")]
 
 import attributes as A  # noqa: E402
 import game  # noqa: E402
+import migrate_ratings  # noqa: E402
 import rankings  # noqa: E402
 
 FAILED: list[str] = []
@@ -180,6 +186,80 @@ def main() -> int:
                         leaks.append(f"{f.name}:{tok.start[0]} SQL mentions {dead}")
     check("no backend code still reads charisma or experience", not leaks,
           "\n          ".join(leaks[:5]))
+
+    # ------------------------------------------------- the deployed-upgrade path
+    #
+    # THE ONE THAT ONLY BITES IN PRODUCTION. On a stateless host the save is
+    # pulled down from Blob storage at boot, so the database the app opens is
+    # whatever is in the store — which can predate this whole rating change no
+    # matter what the deployment bundles. The first roster request then dies on
+    # `no such column: a.wrestling`. So: rebuild an OLD-schema save out of the
+    # real roster, and assert a boot repairs it.
+    print("\nan old save upgrades itself on boot")
+    old = Path(tempfile.mkdtemp()) / "old.db"
+    shutil.copyfile(src, old)
+    oc = sqlite3.connect(old)
+    oc.executescript("""
+        CREATE TABLE attributes_old (
+            wrestler_id INTEGER PRIMARY KEY,
+            charisma    INTEGER NOT NULL,
+            popularity  INTEGER NOT NULL,
+            looks       INTEGER NOT NULL,
+            availability TEXT NOT NULL,
+            role        TEXT NOT NULL DEFAULT 'wrestler',
+            role_source TEXT,
+            alignment   TEXT NOT NULL DEFAULT 'face',
+            personality TEXT NOT NULL DEFAULT 'ambitious',
+            formula_ver INTEGER NOT NULL
+        );
+        -- Back to /25 values, the shape a pre-change save actually had.
+        INSERT INTO attributes_old
+          SELECT wrestler_id,
+                 MIN(25, CAST(popularity * 1.25 AS INTEGER)),
+                 MIN(25, CAST(popularity * 1.25 AS INTEGER)),
+                 MIN(25, CAST(looks * 1.25 AS INTEGER)),
+                 availability, role, role_source, alignment, personality, 3
+            FROM attributes;
+        DROP TABLE attributes;
+        ALTER TABLE attributes_old RENAME TO attributes;
+        DELETE FROM game_setting WHERE key IN ('ratings_scale_version','budget_scale_version');
+        UPDATE attribute_override SET wrestling = NULL, personal = NULL;
+    """)
+    oc.commit()
+    cols_before = {r[1] for r in oc.execute("PRAGMA table_info(attributes)")}
+    check("the fixture really is on the old schema",
+          "charisma" in cols_before and "wrestling" not in cols_before,
+          str(sorted(cols_before)))
+
+    note = migrate_ratings.ensure_migrated(oc)
+    cols_after = {r[1] for r in oc.execute("PRAGMA table_info(attributes)")}
+    check("boot adds wrestling and personal, and drops charisma",
+          {"wrestling", "personal"} <= cols_after and "charisma" not in cols_after,
+          str(sorted(cols_after)))
+    check("boot reports what it did, for the startup log", bool(note), repr(note))
+
+    n_bad = oc.execute(f"""SELECT COUNT(*) FROM attributes
+                            WHERE wrestling NOT BETWEEN 0 AND {A.CAT_MAX}
+                               OR popularity NOT BETWEEN 0 AND {A.CAT_MAX}
+                               OR looks      NOT BETWEEN 0 AND {A.CAT_MAX}
+                               OR personal   NOT BETWEEN 0 AND {A.CAT_MAX}""").fetchone()[0]
+    check("every migrated rating is in range", n_bad == 0, f"{n_bad} out of range")
+    check("the roster survived intact",
+          oc.execute("SELECT COUNT(*) FROM attributes").fetchone()[0]
+          == oc.execute("SELECT COUNT(*) FROM wrestler").fetchone()[0])
+
+    # Second boot must be free. A migration that re-ran would rescale a rescale.
+    again = migrate_ratings.ensure_migrated(oc)
+    check("a second boot is a no-op", again is None, repr(again))
+    sample = oc.execute("SELECT wrestling, popularity, looks, personal "
+                        "FROM attributes ORDER BY wrestler_id LIMIT 1").fetchone()
+    third = migrate_ratings.ensure_migrated(oc)
+    sample2 = oc.execute("SELECT wrestling, popularity, looks, personal "
+                         "FROM attributes ORDER BY wrestler_id LIMIT 1").fetchone()
+    check("and does not quietly rescale the roster again",
+          third is None and sample == sample2, f"{sample} -> {sample2}")
+    oc.close()
+    shutil.rmtree(old.parent, ignore_errors=True)
 
     con.close()
     shutil.rmtree(tmp.parent, ignore_errors=True)

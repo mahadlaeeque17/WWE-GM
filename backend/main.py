@@ -26,6 +26,7 @@ import booking  # noqa: E402
 import game  # noqa: E402
 import images  # noqa: E402
 import negotiate  # noqa: E402
+import migrate_ratings  # noqa: E402
 import rankings  # noqa: E402
 import sim  # noqa: E402
 
@@ -123,8 +124,25 @@ def ensure_ready() -> None:
             game.ensure_schema(c)
             rankings.ensure_schema(c)
             game.ensure_titles(c)
+            # Bring an OLD SAVE forward to the five-category ratings.
+            #
+            # This has to happen here, not in a script someone remembers to run.
+            # On a stateless host the save is pulled down from Blob storage above,
+            # so the database this process actually opens is whatever is in the
+            # store — which can predate the rating change no matter what the
+            # bundled seed contains. Without this the first roster request dies
+            # on `no such column: a.wrestling`. Guarded by a marker, so it is a
+            # cheap no-op on every boot after the first.
+            migrated = migrate_ratings.ensure_migrated(c)
         finally:
             c.close()
+        if migrated:
+            _READY_LOG.append(migrated)
+            # Push the migrated save up NOW rather than waiting for the next
+            # write. Otherwise the store keeps the old format and every cold
+            # start pays for the migration again — and a container that dies
+            # before anyone books a show would lose it entirely.
+            _READY_LOG.append(f"persist after migration: {store.persist(DB)}")
         _READY_LOG.append("schema ready")
     except Exception as e:  # noqa: BLE001
         _READY_LOG.append(f"startup failed: {type(e).__name__}: {e}")

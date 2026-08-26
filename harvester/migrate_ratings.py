@@ -35,6 +35,14 @@ almost certainly the wrong thing to reach for.
 
 A timestamped copy of the database is written beside it first, matching the
 data/gm2000.backup-* files already in the repo.
+
+RUN AUTOMATICALLY ON A SERVER TOO. `ensure_migrated()` is the same migration
+without the backup or the report, and backend/main.py calls it at boot. That is
+not a convenience: on a stateless host the save is pulled down from Blob storage
+before anything opens it, so the database the app actually runs on is whatever is
+in the store — which may predate this change no matter what the bundled seed
+contains. Without this the first request after a deploy dies on
+`no such column: a.wrestling`.
 """
 
 from __future__ import annotations
@@ -214,8 +222,12 @@ BUDGET_MARKER = "budget_scale_version"
 BUDGET_TARGET = "5x20"
 
 
-def _reproject_budgets(con: sqlite3.Connection) -> None:
+def _reproject_budgets(con: sqlite3.Connection) -> str | None:
     """Re-lay the season budget curve to match the new contract prices.
+
+    RETURNS its message rather than printing it. A booting server surfaces the
+    startup log as a list on /api/store/status, so a bare print lands in a
+    container's stdout — invisible in the one place you would go looking for it.
 
     The five-category economy costs a brand roughly 20% more to assemble the same
     twenty wrestlers, and Achievements makes every champion you keep dearer every
@@ -232,12 +244,11 @@ def _reproject_budgets(con: sqlite3.Connection) -> None:
     row = con.execute("SELECT value FROM game_setting WHERE key=?",
                       (BUDGET_MARKER,)).fetchone()
     if row and row[0] == BUDGET_TARGET:
-        return
+        return None
     signed = con.execute("SELECT COUNT(*) FROM contract").fetchone()[0]
     if signed:
-        print(f"budgets left alone — {signed} contracts already signed against the "
-              "old cap.\n  Raise them from the League tab if the new prices bite.")
-        return
+        return (f"budgets left alone — {signed} contracts already signed against "
+                "the old cap. Raise them from the League tab if the new prices bite.")
 
     sys.path.insert(0, str(HERE.parent / "backend"))
     import game  # noqa: PLC0415  — imported here so the harvester does not
@@ -245,7 +256,7 @@ def _reproject_budgets(con: sqlite3.Connection) -> None:
     # depend on the backend just to be importable.
     state = con.execute("SELECT season_year FROM game_state WHERE id=1").fetchone()
     if not state:
-        return
+        return None
     season = state[0]
     brands = [r[0] for r in con.execute("SELECT id FROM brand")]
     con.execute("DELETE FROM brand_budget")
@@ -260,8 +271,8 @@ def _reproject_budgets(con: sqlite3.Connection) -> None:
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
                 (BUDGET_MARKER, BUDGET_TARGET))
     con.commit()
-    print(f"budgets re-projected: ${game.STARTING_BUDGET:,}/brand growing "
-          f"{game.BUDGET_GROWTH:.0%} a year for {game.BUDGET_HORIZON_YEARS} seasons")
+    return (f"budgets re-projected: ${game.STARTING_BUDGET:,}/brand growing "
+            f"{game.BUDGET_GROWTH:.0%} a year for {game.BUDGET_HORIZON_YEARS} seasons")
 
 
 def main(dbpath: Path, dry: bool = False, force: bool = False) -> int:
@@ -276,7 +287,9 @@ def main(dbpath: Path, dry: bool = False, force: bool = False) -> int:
     # Budgets are re-projected under their own marker, so a save that already has
     # the new ratings can still pick up the new cap without --force.
     if not dry:
-        _reproject_budgets(con)
+        budgets = _reproject_budgets(con)
+        if budgets:
+            print(budgets)
 
     seen = _marker(con)
     if seen == TARGET and not force:
@@ -285,12 +298,59 @@ def main(dbpath: Path, dry: bool = False, force: bool = False) -> int:
               "   so this refuses rather than risking it. --force overrides.)")
         return 0
 
-    have = _cols(con, "attributes")
-    if not have:
+    if not _cols(con, "attributes"):
         print("no attributes table — run normalize.py first")
         return 2
 
-    # ---------------------------------------------------------------- read
+    rows, plan = _build_plan(con)
+
+    # ---------------------------------------------------------------- report
+    print(f"{len(plan)} wrestlers")
+    src = {}
+    for p in plan:
+        src[p["why"]] = src.get(p["why"], 0) + 1
+    print("  Wrestling seeded from:", ", ".join(f"{k} {v}" for k, v in sorted(src.items())))
+
+    def eff(p, key):
+        o = p.get("o_" + key)
+        return o if o is not None else p[key]
+
+    ranked = sorted(plan, key=lambda p: -(p["wrestling"] + eff(p, "popularity")
+                                          + eff(p, "looks") + p["personal"]))
+    print("\n  highest day-one overall (Achievements is 0 for everyone):")
+    for p in ranked[:12]:
+        ov = p["wrestling"] + eff(p, "popularity") + eff(p, "looks") + p["personal"]
+        print(f"    {ov:3d}  {p['name'][:26]:26s} "
+              f"wrs {p['wrestling']:2d}  ach  0  pop {eff(p,'popularity'):2d}  "
+              f"lks {eff(p,'looks'):2d}  per {p['personal']:2d}")
+    print("  lowest:")
+    for p in ranked[-5:]:
+        ov = p["wrestling"] + eff(p, "popularity") + eff(p, "looks") + p["personal"]
+        print(f"    {ov:3d}  {p['name'][:26]:26s} "
+              f"wrs {p['wrestling']:2d}  ach  0  pop {eff(p,'popularity'):2d}  "
+              f"lks {eff(p,'looks'):2d}  per {p['personal']:2d}")
+
+    if dry:
+        print("\n--dry: nothing written.")
+        con.close()
+        return 0
+
+    # ---------------------------------------------------------------- write
+    backup = dbpath.with_name(f"{dbpath.stem}.pre-ratings-{int(time.time())}.db")
+    shutil.copyfile(dbpath, backup)
+    print(f"\nbacked up to {backup.name}")
+
+    summary = _apply(con, rows, plan)
+    con.commit()
+    print(summary)
+    kept = con.execute("SELECT COUNT(*) FROM attribute_override").fetchone()[0]
+    print(f"attribute_override preserved: {kept} rows")
+    con.close()
+    return 0
+
+
+def _build_plan(con: sqlite3.Connection):
+    """Read the old ratings and compute the new ones. Writes nothing."""
     rows = con.execute(
         """SELECT w.id, w.name, w.rating, w.votes,
                   a.charisma, a.popularity, a.looks, a.availability,
@@ -341,42 +401,11 @@ def main(dbpath: Path, dry: bool = False, force: bool = False) -> int:
             "old": (r["charisma"], r["popularity"], r["looks"]),
         })
 
-    # ---------------------------------------------------------------- report
-    print(f"{len(plan)} wrestlers")
-    src = {}
-    for p in plan:
-        src[p["why"]] = src.get(p["why"], 0) + 1
-    print("  Wrestling seeded from:", ", ".join(f"{k} {v}" for k, v in sorted(src.items())))
+    return rows, plan
 
-    def eff(p, key):
-        o = p.get("o_" + key)
-        return o if o is not None else p[key]
 
-    ranked = sorted(plan, key=lambda p: -(p["wrestling"] + eff(p, "popularity")
-                                          + eff(p, "looks") + p["personal"]))
-    print("\n  highest day-one overall (Achievements is 0 for everyone):")
-    for p in ranked[:12]:
-        ov = p["wrestling"] + eff(p, "popularity") + eff(p, "looks") + p["personal"]
-        print(f"    {ov:3d}  {p['name'][:26]:26s} "
-              f"wrs {p['wrestling']:2d}  ach  0  pop {eff(p,'popularity'):2d}  "
-              f"lks {eff(p,'looks'):2d}  per {p['personal']:2d}")
-    print("  lowest:")
-    for p in ranked[-5:]:
-        ov = p["wrestling"] + eff(p, "popularity") + eff(p, "looks") + p["personal"]
-        print(f"    {ov:3d}  {p['name'][:26]:26s} "
-              f"wrs {p['wrestling']:2d}  ach  0  pop {eff(p,'popularity'):2d}  "
-              f"lks {eff(p,'looks'):2d}  per {p['personal']:2d}")
-
-    if dry:
-        print("\n--dry: nothing written.")
-        con.close()
-        return 0
-
-    # ---------------------------------------------------------------- write
-    backup = dbpath.with_name(f"{dbpath.stem}.pre-ratings-{int(time.time())}.db")
-    shutil.copyfile(dbpath, backup)
-    print(f"\nbacked up to {backup.name}")
-
+def _apply(con: sqlite3.Connection, rows, plan) -> str:
+    """Do the writes. Caller commits, so a failure leaves nothing half-done."""
     # attributes must be REWRITTEN: charisma is NOT NULL with no default and
     # SQLite cannot drop that in place.
     con.executescript("""
@@ -420,23 +449,68 @@ def main(dbpath: Path, dry: bool = False, force: bool = False) -> int:
     # The season-end engine used to suggest changes to charisma. That category no
     # longer exists, so pending suggestions against it can never be applied —
     # they are dropped rather than left to fail silently on approval.
+    dropped = 0
     if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                    "AND name='rating_change'").fetchone():
-        n = con.execute("DELETE FROM rating_change WHERE category='charisma' "
-                        "AND status='pending'").rowcount
-        if n:
-            print(f"dropped {n} pending charisma suggestions (category retired)")
+        dropped = con.execute("DELETE FROM rating_change WHERE category='charisma' "
+                              "AND status='pending'").rowcount
 
     con.execute("""INSERT INTO game_setting (key, value) VALUES (?,?)
                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
                 (MARKER, TARGET))
-    con.commit()
 
-    kept = con.execute("SELECT COUNT(*) FROM attribute_override").fetchone()[0]
-    print(f"migrated {len(plan)} wrestlers to the {TARGET} scale")
-    print(f"attribute_override preserved: {kept} rows")
-    con.close()
-    return 0
+    msg = f"migrated {len(plan)} wrestlers to the {TARGET} scale"
+    if dropped:
+        msg += f", dropped {dropped} pending charisma suggestions (category retired)"
+    return msg
+
+
+def ensure_migrated(con: sqlite3.Connection) -> str | None:
+    """Bring an already-open save forward. Returns None if nothing was needed.
+
+    This is the path a BOOTING SERVER takes, and it exists because on a
+    stateless host the database the app runs on is whatever was in Blob storage,
+    not whatever shipped in the deployment. A save uploaded before this change
+    has no `attributes.wrestling` column, and the first roster request would die
+    on it — so the check has to happen at boot rather than being something a
+    human remembers to run.
+
+    No backup file: the durable copy in the store is still the pre-migration
+    save until the next write pushes this one up, and writing a backup into a
+    container's /tmp would be a backup that dies with the container. Nothing is
+    printed either — the caller owns the startup log.
+    """
+    # Sets its own row factory rather than trusting the caller's. The plan reads
+    # columns by NAME, so a plain tuple connection fails deep inside with
+    # "tuple indices must be integers" — a long way from the actual mistake.
+    # Restored afterwards, so a caller that wanted tuples still gets them.
+    prior_factory = con.row_factory
+    con.row_factory = sqlite3.Row
+    try:
+        return _ensure_migrated(con)
+    finally:
+        con.row_factory = prior_factory
+
+
+def _ensure_migrated(con: sqlite3.Connection) -> str | None:
+    notes = [n for n in (_reproject_budgets(con),) if n]
+    if _marker(con) == TARGET:
+        return "; ".join(notes) or None
+    if not _cols(con, "attributes"):
+        return "; ".join(notes) or None
+    if "charisma" not in _cols(con, "attributes"):
+        # Newer than the marker suggests — the columns are already right, so the
+        # save was migrated by a build that predates the marker. Stamp it and
+        # stop, rather than rewriting a table that is already correct.
+        con.execute("""INSERT INTO game_setting (key, value) VALUES (?,?)
+                       ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                    (MARKER, TARGET))
+        con.commit()
+        return "; ".join(notes) or None
+    rows, plan = _build_plan(con)
+    notes.append(_apply(con, rows, plan))
+    con.commit()
+    return "; ".join(notes)
 
 
 if __name__ == "__main__":

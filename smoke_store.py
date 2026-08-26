@@ -5,9 +5,12 @@ filesystem, run it again, and check the game is still there. `dir` mode stands
 in for Vercel Blob so the lifecycle is testable without a cloud account — the
 blob backend is the same two calls behind an HTTP adapter.
 """
+import atexit
 import json
 import os
 import shutil
+import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -39,6 +42,33 @@ for _d in (EPHEMERAL, REMOTE):
     wipe(_d)
 
 
+def refuse_a_busy_port() -> None:
+    """Fail loudly if something already owns PORT.
+
+    A leaked uvicorn from an earlier run answers on this port perfectly happily,
+    and its data directory has just been wiped by the lines above — so `boot()`
+    talks to the wrong server and the test fails with "database missing", which
+    points at the app instead of at the stale process. Cheap check, hours saved.
+    """
+    with socket.socket() as sk:
+        sk.settimeout(0.4)
+        if sk.connect_ex(("127.0.0.1", int(PORT))) == 0:
+            raise SystemExit(
+                f"something is already listening on port {PORT} — almost certainly a\n"
+                f"leaked server from an earlier run. Stop it and try again:\n"
+                f'  PowerShell: Get-NetTCPConnection -LocalPort {PORT} -State Listen | '
+                f'%{{ Stop-Process -Id $_.OwningProcess -Force }}')
+
+
+refuse_a_busy_port()
+
+# How many wrestlers the bundled seed actually holds. NOT a literal: this used to
+# be `== 270` and broke the moment a roster batch landed, which reads as the save
+# system failing when nothing about it had changed.
+with sqlite3.connect(f"file:{ROOT / 'data' / 'gm2000.db'}?mode=ro", uri=True) as _c:
+    SEED_ROSTER = _c.execute("SELECT COUNT(*) FROM wrestler").fetchone()[0]
+
+
 def _md5(p: Path) -> str:
     import hashlib
     return hashlib.md5(p.read_bytes()).hexdigest()
@@ -68,6 +98,11 @@ def boot(label):
         [sys.executable, "-m", "uvicorn", "main:app", "--port", PORT, "--log-level", "warning"],
         cwd=ROOT / "backend", env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Reap it even if an assertion below blows up. Without this a failed run
+    # leaves a server holding PORT, and the NEXT run talks to that stale process
+    # against a wiped data directory — so one real failure produces a second,
+    # unrelated-looking one that sends you hunting in the wrong place.
+    atexit.register(lambda: p.poll() is None and p.kill())
     for _ in range(60):
         time.sleep(1)
         try:
@@ -96,7 +131,7 @@ print("  store:", st["mode"], "| configured", st["configured"], "| err", st["err
 assert st["configured"], st
 h = api("/api/health")
 print("  health:", h["ok"], h["wrestlers"], "wrestlers")
-assert h["wrestlers"] == 270
+assert h["wrestlers"] == SEED_ROSTER, f"{h['wrestlers']} != seed {SEED_ROSTER}"
 assert (REMOTE / "gm2000.db").exists(), "seed was never uploaded to the store"
 print("  store seeded:", (REMOTE / "gm2000.db").stat().st_size, "bytes")
 
