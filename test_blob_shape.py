@@ -53,7 +53,14 @@ class Stub(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
-        self._json({"blobs": [], "hasMore": False})
+        # A listing with an uploadedAt, which is what the public read path uses
+        # to defeat the CDN.
+        self._json({"blobs": [{
+            "pathname": "gm2000.db",
+            "url": "https://STOREID123.public.blob.vercel-storage.com/gm2000.db",
+            "uploadedAt": "2026-08-26T21:15:00.000Z",
+            "size": 606208,
+        }], "hasMore": False})
 
     def do_PUT(self):
         n = int(self.headers.get("content-length") or 0)
@@ -96,8 +103,12 @@ def main() -> int:
     h = put["headers"]
     ok &= check("x-api-version is 12", h.get("x-api-version") == "12",
                 f"got {h.get('x-api-version')!r}")
-    ok &= check("x-vercel-blob-access is private",
-                h.get("x-vercel-blob-access") == "private",
+    # Asserted against the configured default rather than a literal, because
+    # which mode is tried FIRST is a tuning decision (the retry covers the other),
+    # whereas sending the header at all is the thing that was broken.
+    ok &= check(f"x-vercel-blob-access is sent, as {store.BLOB_ACCESS}",
+                h.get("x-vercel-blob-access") == store.BLOB_ACCESS
+                and store.BLOB_ACCESS in ("public", "private"),
                 f"got {h.get('x-vercel-blob-access')!r}")
     ok &= check("x-vercel-blob-store-id is sent",
                 h.get("x-vercel-blob-store-id") == STORE_ID,
@@ -123,6 +134,48 @@ def main() -> int:
     ok &= check("public host is <storeId>.public.blob.vercel-storage.com",
                 pub == f"https://{STORE_ID}.public.blob.vercel-storage.com/gm2000.db",
                 f"got {pub!r}")
+
+    print("\npublic reads cannot be served stale")
+    # A public store REJECTS ?cache=0, so freshness has to come from the API's
+    # uploadedAt instead. Without it a cold boot can hydrate an old save off the
+    # CDN and the next write pushes that back over the newer one — silent loss
+    # that looks like the game forgetting a session at random.
+    pub_read = store._public_fresh_url()
+    ok &= check("the public read URL carries a version from uploadedAt",
+                pub_read is not None and "v=2026-08-26T21%3A15%3A00.000Z" in pub_read,
+                f"got {pub_read!r}")
+    ok &= check("private keeps the direct, no-round-trip path",
+                store._direct_url("private").endswith("?cache=0"))
+
+    print("\ntoken discovery")
+    saved = {k: os.environ.get(k) for k in
+             ("BLOB_READ_WRITE_TOKEN", "WWEGM_READ_WRITE_TOKEN",
+              "AAA_READ_WRITE_TOKEN", "GM2000_BLOB_TOKEN_VAR")}
+    try:
+        # A store named WWEGM gets PREFIXED variables, not the default name — so
+        # a correctly connected store used to read as "no store linked".
+        os.environ.pop("BLOB_READ_WRITE_TOKEN", None)
+        os.environ.pop("GM2000_BLOB_TOKEN_VAR", None)
+        os.environ["WWEGM_READ_WRITE_TOKEN"] = FAKE_TOKEN
+        tok, var = store._find_token()
+        ok &= check("a prefixed *_READ_WRITE_TOKEN is found",
+                    tok == FAKE_TOKEN and var == "WWEGM_READ_WRITE_TOKEN",
+                    f"got {var!r}")
+        # Postgres and Redis integrations also inject *_READ_WRITE_TOKEN names.
+        os.environ["AAA_READ_WRITE_TOKEN"] = "postgres://nope"
+        ok &= check("a same-suffix variable that is not a blob token is ignored",
+                    store._find_token()[1] == "WWEGM_READ_WRITE_TOKEN",
+                    f"got {store._find_token()[1]!r}")
+        os.environ.pop("AAA_READ_WRITE_TOKEN", None)
+        os.environ["BLOB_READ_WRITE_TOKEN"] = FAKE_TOKEN
+        ok &= check("the conventional name still wins when both exist",
+                    store._find_token()[1] == "BLOB_READ_WRITE_TOKEN")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     print("\nfallback list request")
     SEEN.clear()

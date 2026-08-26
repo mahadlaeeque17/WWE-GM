@@ -42,8 +42,38 @@ from pathlib import Path
 
 import httpx
 
-# Vercel injects BLOB_READ_WRITE_TOKEN when a Blob store is linked to the project.
-BLOB_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "")
+# Find the store token, whatever Vercel decided to call it.
+#
+# THE DEFAULT NAME IS NOT THE ONLY NAME. Vercel injects `BLOB_READ_WRITE_TOKEN`
+# only for a store created with the default name; name your store `WWEGM` and the
+# variables arrive prefixed — `WWEGM_READ_WRITE_TOKEN`, `WWEGM_STORE_ID`. Reading
+# just the default name meant a correctly created, correctly connected store still
+# presented as "no Blob store linked", which is indistinguishable from having
+# forgotten to connect it — and sends you to the wrong part of the dashboard.
+#
+# So: take an explicit override, then the conventional name, then ANY variable
+# ending `_READ_WRITE_TOKEN` whose value actually looks like a blob token. That
+# last rule is what makes the app work regardless of what the store is called,
+# without anyone having to know this quirk exists.
+TOKEN_SUFFIX = "_READ_WRITE_TOKEN"
+TOKEN_PREFIX = "vercel_blob_rw_"
+
+
+def _find_token() -> tuple[str, str]:
+    """(token, which env var it came from). Empty strings if there is none."""
+    explicit = os.environ.get("GM2000_BLOB_TOKEN_VAR", "").strip()
+    if explicit:
+        return os.environ.get(explicit, ""), explicit
+    if os.environ.get("BLOB_READ_WRITE_TOKEN"):
+        return os.environ["BLOB_READ_WRITE_TOKEN"], "BLOB_READ_WRITE_TOKEN"
+    # Sorted so the choice is deterministic when a project has two stores linked.
+    for name in sorted(os.environ):
+        if name.endswith(TOKEN_SUFFIX) and os.environ[name].startswith(TOKEN_PREFIX):
+            return os.environ[name], name
+    return "", ""
+
+
+BLOB_TOKEN, BLOB_TOKEN_VAR = _find_token()
 
 # If a Blob store is linked, USE IT — do not also demand GM2000_STORE=blob.
 #
@@ -133,6 +163,10 @@ def status() -> dict:
         "durable": dur,
         "durable_detail": dur_detail,
         "ephemeral_host": EPHEMERAL_HOST,
+        # The NAME of the variable the token came from, never the token. Which
+        # variable was found is the single most useful thing when a correctly
+        # created store still reports as missing.
+        "token_var": BLOB_TOKEN_VAR or None,
         "put_variant": put_variant(),
         **_last,
     }
@@ -147,9 +181,10 @@ def _configured() -> tuple[bool, str]:
         return True, f"directory {REMOTE_DIR}"
     if MODE == "blob":
         if not BLOB_TOKEN:
-            return False, ("BLOB_READ_WRITE_TOKEN is not set — link a Blob store "
-                           "to the Vercel project")
-        return True, f"Vercel Blob key {BLOB_KEY}"
+            return False, ("no blob token in the environment — connect the Blob "
+                           "store to this project, then redeploy. Looked for "
+                           "BLOB_READ_WRITE_TOKEN and any *_READ_WRITE_TOKEN")
+        return True, f"Vercel Blob key {BLOB_KEY} via {BLOB_TOKEN_VAR}"
     return False, f"unknown GM2000_STORE mode {MODE!r}"
 
 
@@ -205,7 +240,12 @@ def _dir_put(data: bytes) -> None:
 
 from urllib.parse import quote
 
-BLOB_ACCESS = os.environ.get("GM2000_BLOB_ACCESS", "private").strip().lower()
+# Which access mode to TRY FIRST. The retry in _blob_put covers the other one, so
+# this is only about not spending a guaranteed-failed request on every upload.
+# Public is the default because a store created through the dashboard's normal
+# flow is public unless you deliberately choose otherwise — but private is the
+# better choice for a save file, and _direct_url explains why.
+BLOB_ACCESS = os.environ.get("GM2000_BLOB_ACCESS", "public").strip().lower()
 
 _good_variant: str | None = None
 
@@ -268,6 +308,20 @@ def _direct_url(access: str) -> str | None:
     return f"{url}?cache=0" if access == "private" else url
 
 
+def _blob_listing() -> dict | None:
+    """Ask the store about the save: its url, and when it was last written.
+
+    This is an API call, not a CDN read, so what it says is always current —
+    which is what makes it usable as the freshness source for a public store.
+    """
+    r = httpx.get(BLOB_API, headers=_blob_headers(), timeout=TIMEOUT,
+                  params={"prefix": BLOB_KEY, "limit": "1"})
+    _blob_raise(r, "list")
+    blobs = r.json().get("blobs") or []
+    match = next((b for b in blobs if b.get("pathname") == BLOB_KEY), None)
+    return match or (blobs[0] if blobs else None)
+
+
 def _blob_url() -> str | None:
     """Fallback lookup: ask the store what the save's URL is.
 
@@ -275,15 +329,41 @@ def _blob_url() -> str | None:
     not happen — but a listing failure carries a readable error, whereas a bad
     guess at a hostname just times out.
     """
-    r = httpx.get(BLOB_API, headers=_blob_headers(), timeout=TIMEOUT,
-                  params={"prefix": BLOB_KEY, "limit": "1"})
-    _blob_raise(r, "list")
-    blobs = r.json().get("blobs") or []
-    match = next((b for b in blobs if b.get("pathname") == BLOB_KEY), None)
-    match = match or (blobs[0] if blobs else None)
+    match = _blob_listing()
     if not match:
         return None
     return match.get("downloadUrl") or match.get("url")
+
+
+def _public_fresh_url() -> str | None:
+    """A public blob URL that CANNOT serve a stale copy.
+
+    THE PROBLEM WITH A PUBLIC STORE, and the reason this function is not
+    optional. Public blobs are served through the CDN with a long cache lifetime,
+    and `?cache=0` — the private-store escape hatch — is rejected on public ones.
+    This app overwrites ONE key after every single write, so a cached read means a
+    cold boot hydrates an old save and the next write pushes it back over the
+    newer one. Silent, permanent, and it looks like the game forgetting a session
+    at random rather than like a caching bug.
+
+    So the freshness comes from the API instead: `list` reports `uploadedAt`,
+    which changes on every upload, and hanging it on the URL as a query parameter
+    makes each version a distinct cache entry. It costs one extra request per cold
+    boot, which is the correct trade against losing a save.
+
+    A private store needs none of this and keeps the direct, no-round-trip path.
+    """
+    match = _blob_listing()
+    if not match:
+        return None
+    url = match.get("url") or match.get("downloadUrl")
+    if not url:
+        return None
+    stamp = match.get("uploadedAt") or match.get("etag") or match.get("size")
+    if stamp is None:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={quote(str(stamp), safe='')}"
 
 
 def _blob_get() -> bytes | None:
@@ -299,9 +379,12 @@ def _blob_get() -> bytes | None:
 
     last = None
     for access in order:
-        url = _direct_url(access)
+        # Private reads go direct and cache-busted. Public reads have to ask the
+        # API when the save was last written, because there is no cache=0 for
+        # them — see _public_fresh_url.
+        url = _direct_url(access) if access == "private" else _public_fresh_url()
         if not url:
-            break
+            continue
         r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True,
                       headers={"authorization": f"Bearer {BLOB_TOKEN}"})
         if r.status_code < 400:
