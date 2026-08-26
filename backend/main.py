@@ -28,6 +28,7 @@ import images  # noqa: E402
 import negotiate  # noqa: E402
 import migrate_ratings  # noqa: E402
 import rankings  # noqa: E402
+import rumble  # noqa: E402
 import sim  # noqa: E402
 
 import os  # noqa: E402
@@ -1600,6 +1601,36 @@ def news(limit: int = 40) -> list[dict]:
         c.close()
 
 
+# ---------------------------------------------------------------- royal rumble
+
+@app.get("/api/rumble/field")
+def rumble_field(size: int = rumble.FULL_FIELD) -> list[dict]:
+    """A ready-made field, so the Rumble is one click from playable."""
+    c = conn()
+    try:
+        return rumble.suggest_field(c, max(rumble.MIN_FIELD, min(rumble.FULL_FIELD, size)))
+    finally:
+        c.close()
+
+
+class RumbleBody(BaseModel):
+    # Order matters: entrant 1 comes in first and has the furthest to go.
+    entrants: list[int]
+    name: str = "Royal Rumble"
+    brand_id: str | None = None
+
+
+@app.post("/api/rumble")
+def run_rumble(body: RumbleBody) -> dict:
+    c = conn()
+    try:
+        return rumble.simulate(c, body.entrants, body.name, brand_id=body.brand_id)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
 # ---------------------------------------------------------------- year-end awards
 
 @app.get("/api/awards/nominations")
@@ -1607,6 +1638,27 @@ def award_nominations(season: int | None = None) -> list[dict]:
     c = conn()
     try:
         return game.list_nominations(c, season)
+    finally:
+        c.close()
+
+
+@app.post("/api/awards/generate")
+def generate_awards(season: int | None = Body(None, embed=True)) -> dict:
+    """Re-run this season's nominations.
+
+    They are generated automatically when the calendar rolls over, but that made
+    them un-re-runnable: book more shows and the shortlist stays frozen at
+    whatever the roster looked like in December. Idempotent — it clears the
+    pending nominations for the season and rebuilds them, leaving anything
+    already crowned alone.
+    """
+    c = conn()
+    try:
+        st = current_state(c)
+        if not st:
+            raise HTTPException(400, "no active save")
+        yr = season if season is not None else st["season_year"]
+        return {"season": yr, "nominations": game.generate_nominations(c, yr)}
     finally:
         c.close()
 

@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchShows, fetchShow, fetchBrands, fetchCalendar, runShow,
-  aiCommentary, aiRecap, aiRivalBook, imageUrl,
+  aiCommentary, aiRecap, aiRivalBook, imageUrl, type RosterRow,
 } from './api'
 import { Stars } from './ui'
+import RumblePanel from './RumblePanel'
 import CalendarView from './CalendarView'
 import BookingScreen from './BookingScreen'
 import { playShow } from './sound'
@@ -20,7 +21,7 @@ function qualityColour(q: number | null): string {
 
 type Mode = 'auto' | 'manual' | 'ai'
 
-export default function ShowsTab() {
+export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
   const qc = useQueryClient()
   const { data: shows = [] } = useQuery({ queryKey: ['shows'], queryFn: fetchShows })
   const { data: brands = [] } = useQuery({ queryKey: ['brands'], queryFn: fetchBrands })
@@ -216,6 +217,13 @@ export default function ShowsTab() {
               ? <CalendarView cal={calendar} />
               : <p className="text-sm text-slate-500">Start a new game to see the calendar.</p>}
             <p className="text-xs text-slate-600 mt-4">Pick a show on the left to see its card.</p>
+          </div>
+        )}
+        {/* The Rumble is a show, so it lives with the shows — and it sits under
+            the calendar because the calendar is where you find out it is due. */}
+        {!detail && calendar?.active && (
+          <div className="max-w-[860px] mt-6">
+            <RumblePanel roster={roster} />
           </div>
         )}
         {detail && <ShowDetail detail={detail} onNarrated={() => qc.invalidateQueries({ queryKey: ['show', open] })} />}

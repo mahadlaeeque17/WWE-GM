@@ -548,7 +548,7 @@ export default function App() {
       {tab === 'rankings' && <RankingsTab roster={roster} />}
       {tab === 'progression' && <ProgressionTab roster={roster} />}
       {tab === 'league' && <BrandsTab roster={roster} />}
-      {tab === 'shows' && <ShowsTab />}
+      {tab === 'shows' && <ShowsTab roster={roster} />}
       {tab === 'images' && <ImagesTab />}
 
       <footer className="border-t border-edge px-6 py-2 text-[11px] text-slate-600">

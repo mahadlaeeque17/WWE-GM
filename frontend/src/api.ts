@@ -534,6 +534,37 @@ export const fetchNominations = (season?: number) =>
   req<Nomination[]>(`/api/awards/nominations${season != null ? `?season=${season}` : ''}`)
 export const crownAward = (nomId: number) => req<any>(`/api/awards/${nomId}/crown`, { method: 'POST' })
 
+// ------------------------------------------------------------------- the Rumble
+
+export interface RumbleEntrant {
+  wrestler_id: number; name: string; number: number
+  eliminations: number; lasted: number
+}
+export interface RumbleEvent {
+  t: number; kind: 'enter' | 'out' | 'win'
+  wrestler_id: number; name: string
+  number?: number; by?: number | null; by_name?: string | null
+}
+export interface RumbleResult {
+  show_id: number; match_id: number; name: string; held_on: string
+  entrants: RumbleEntrant[]
+  timeline: RumbleEvent[]
+  winner: RumbleEntrant
+  iron_woman: boolean
+  most_eliminations: RumbleEntrant | null
+  quality: number
+}
+
+export interface RumbleCandidate { wrestler_id: number; name: string; overall: number }
+
+/** A ready-made field, weakest first, so the stars come in last. */
+export const fetchRumbleField = (size = 30) =>
+  req<RumbleCandidate[]>(`/api/rumble/field?size=${size}`)
+
+export const runRumble = (entrants: number[], name: string, brand_id?: string | null) =>
+  req<RumbleResult>('/api/rumble',
+    { method: 'POST', body: JSON.stringify({ entrants, name, brand_id }) })
+
 export const scanImages = () => req<any>('/api/images/scan', { method: 'POST' })
 export const syncDrive = (folder_id?: string) =>
   req<any>('/api/images/sync-drive', { method: 'POST', body: JSON.stringify({ folder_id: folder_id ?? null }) })

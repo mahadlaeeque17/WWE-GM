@@ -1961,14 +1961,22 @@ def generate_nominations(con: sqlite3.Connection, season: int) -> int:
     yr = str(season)
     # Match of the Year — top-quality matches this season.
     for m in con.execute(
-        """SELECT m.id, m.quality FROM sim_match m JOIN show s ON s.id=m.show_id
+        """SELECT m.id, m.quality, m.stipulation FROM sim_match m JOIN show s ON s.id=m.show_id
            WHERE substr(s.held_on,1,4)=? ORDER BY m.quality DESC LIMIT ?""", (yr, AWARD_NOMINEES)):
         parts = [r["wrestler_id"] for r in con.execute(
             "SELECT wrestler_id FROM sim_match_participant WHERE match_id=?", (m["id"],))]
         winner = con.execute(
             "SELECT wrestler_id FROM sim_match_participant WHERE match_id=? AND is_winner=1 LIMIT 1",
             (m["id"],)).fetchone()
-        names = " vs ".join(_wname(con, w) for w in parts[:4])
+        # A big multi-woman match is named by WHAT IT WAS, not by four of the
+        # thirty people in it. Listing "A vs B vs C vs D" for a Royal Rumble reads
+        # as a fatal four-way and hides the match that actually happened.
+        if len(parts) > 4 and m["stipulation"]:
+            names = m["stipulation"]
+            if winner:
+                names = f"{_wname(con, winner['wrestler_id'])} won the {names}"
+        else:
+            names = " vs ".join(_wname(con, w) for w in parts[:4])
         add("match_of_year", winner["wrestler_id"] if winner else (parts[0] if parts else None),
             f"{names} ★{round((m['quality'] or 0)/20,1)}", m["quality"])
 
@@ -2001,6 +2009,57 @@ def generate_nominations(con: sqlite3.Connection, season: int) -> int:
            LIMIT ?""", (yr, yr, AWARD_NOMINEES)):
         add("woman_of_year", r["id"], f"{_wname(con, r['id'])} — {r['wins']}W, {r['reigns']} title win(s)",
             r["wins"] + 8 * r["reigns"])
+
+    # Most Improved — the biggest APPROVED rating gains of the season.
+    #
+    # The only award with a genuinely objective source: `rating_change` records
+    # every progression the GM approved, so "who got better this year" is already
+    # written down. Nominating on anything else would be guessing at it.
+    for r in con.execute(
+        """SELECT wrestler_id, SUM(to_value - from_value) gain
+             FROM rating_change
+            WHERE season_year=? AND status='approved' AND to_value > from_value
+            GROUP BY wrestler_id
+            ORDER BY gain DESC LIMIT ?""", (season, AWARD_NOMINEES)):
+        add("most_improved", r["wrestler_id"],
+            f"{_wname(con, r['wrestler_id'])} — +{r['gain']} across her ratings", r["gain"])
+
+    # Babe of the Year — on Looks and Personal, which are the GM's own numbers.
+    #
+    # Deliberately circular, and that is the honest way to do it: this award has
+    # never been about anything measurable, so it is scored on the two categories
+    # the GM owns outright rather than dressed up as a performance metric. Only
+    # wrestlers who actually worked are eligible, so it cannot go to someone who
+    # spent the year off television.
+    for r in con.execute(
+        """SELECT w.id, COALESCE(o.looks, a.looks) lk, COALESCE(o.personal, a.personal) pe
+             FROM wrestler w
+             JOIN attributes a ON a.wrestler_id = w.id
+             LEFT JOIN attribute_override o ON o.wrestler_id = w.id
+             LEFT JOIN wrestler_state s ON s.wrestler_id = w.id
+            WHERE COALESCE(s.sim_matches, 0) > 0
+            ORDER BY (COALESCE(o.looks, a.looks) + COALESCE(o.personal, a.personal)) DESC,
+                     w.id LIMIT ?""", (AWARD_NOMINEES,)):
+        add("babe_of_year", r["id"],
+            f"{_wname(con, r['id'])} — looks {r['lk']}, personal {r['pe']}",
+            r["lk"] + r["pe"])
+
+    # A Slammy for the year's most talked-about act — momentum plus feud heat,
+    # which between them are the closest thing the sim has to "buzz".
+    for r in con.execute(
+        """SELECT w.id, COALESCE(s.momentum, 50) mom,
+                  COALESCE((SELECT MAX(f.heat) FROM feud f
+                             WHERE f.a_id = w.id OR f.b_id = w.id), 0) heat
+             FROM wrestler w
+             LEFT JOIN wrestler_state s ON s.wrestler_id = w.id
+            WHERE COALESCE(s.sim_matches, 0) > 0
+            ORDER BY (COALESCE(s.momentum, 50)
+                      + COALESCE((SELECT MAX(f.heat) FROM feud f
+                                   WHERE f.a_id = w.id OR f.b_id = w.id), 0)) DESC
+            LIMIT ?""", (AWARD_NOMINEES,)):
+        add("slammy", r["id"],
+            f"{_wname(con, r['id'])} — momentum {r['mom']}, feud heat {r['heat']}",
+            r["mom"] + r["heat"])
 
     con.commit()
     if n:
