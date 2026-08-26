@@ -489,6 +489,93 @@ def set_override(wid: int, body: Override) -> dict:
         c.close()
 
 
+class RatingEdit(BaseModel):
+    """One cell of the rating sheet. Absent field = leave that category alone."""
+    wrestler_id: int
+    wrestling: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    popularity: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    looks: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    personal: int | None = Field(None, ge=0, le=A.CAT_MAX)
+
+
+@app.post("/api/ratings/bulk")
+def bulk_ratings(edits: list[RatingEdit] = Body(...)) -> dict:
+    """Apply many rating edits in ONE transaction.
+
+    Exists because of what a per-cell save would cost. Two of the five categories
+    are the GM's alone, so setting them across a 370-strong roster is a real sit-
+    down job — and on a stateless host EVERY successful write pushes the whole
+    database back to Blob storage. Three hundred and seventy cells would mean
+    three hundred and seventy uploads of the same file. This is one.
+
+    PARTIAL BY DESIGN. A field left out is not cleared, it is untouched — which is
+    the difference between "I set her Looks" and "I set her Looks and silently
+    froze her Wrestling at whatever the formula said this afternoon". The
+    per-wrestler PUT endpoint replaces the whole row; this one does not.
+    """
+    if not edits:
+        return {"updated": 0}
+    if len(edits) > 2000:
+        raise HTTPException(413, f"{len(edits)} edits at once is too many")
+
+    c = conn()
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        known = {r[0] for r in c.execute("SELECT id FROM wrestler")}
+        missing = [e.wrestler_id for e in edits if e.wrestler_id not in known]
+        if missing:
+            raise HTTPException(404, f"no such wrestler: {missing[:5]}")
+
+        touched = 0
+        for e in edits:
+            fields = {k: v for k, v in
+                      (("wrestling", e.wrestling), ("popularity", e.popularity),
+                       ("looks", e.looks), ("personal", e.personal))
+                      if v is not None}
+            if not fields:
+                continue
+            cols = ", ".join(fields)
+            marks = ", ".join("?" for _ in fields)
+            sets = ", ".join(f"{k}=excluded.{k}" for k in fields)
+            c.execute(
+                f"""INSERT INTO attribute_override (wrestler_id, {cols}, updated_at)
+                    VALUES (?, {marks}, ?)
+                    ON CONFLICT(wrestler_id) DO UPDATE SET {sets},
+                      updated_at=excluded.updated_at""",
+                (e.wrestler_id, *fields.values(), now))
+            touched += 1
+        c.commit()
+        return {"updated": touched}
+    finally:
+        c.close()
+
+
+@app.get("/api/ratings/progress")
+def rating_progress() -> dict:
+    """How much of the roster you have actually rated by hand.
+
+    Looks and Personal belong to the GM outright, and a roster of 370 arrives with
+    both on a placeholder — so "how far through am I" is a real question the app
+    should be able to answer, rather than something to work out by scrolling.
+    """
+    c = conn()
+    try:
+        row = c.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(CASE WHEN o.looks    IS NULL THEN 1 ELSE 0 END) AS looks_todo,
+                      SUM(CASE WHEN o.personal IS NULL THEN 1 ELSE 0 END) AS personal_todo
+                 FROM wrestler w
+                 LEFT JOIN attribute_override o ON o.wrestler_id = w.id
+                WHERE w.id NOT IN (SELECT wrestler_id FROM excluded_wrestler)"""
+        ).fetchone()
+        return {"total": row["total"],
+                "looks_todo": row["looks_todo"] or 0,
+                "personal_todo": row["personal_todo"] or 0}
+    finally:
+        c.close()
+
+
 @app.post("/api/wrestler/{wid}/rename")
 def rename_wrestler(wid: int, display_name: str | None = Body(None, embed=True)) -> dict:
     """Rename for display only — the original harvested name is kept for ID.

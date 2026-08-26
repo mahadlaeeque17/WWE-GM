@@ -9,6 +9,7 @@ import {
   type RosterRow, type BrandFinance,
 } from './api'
 import { AlignChip } from './ui'
+import Pentagon, { valuesOf } from './Pentagon'
 import { usePhotos } from './prefs'
 
 /**
@@ -413,6 +414,18 @@ export default function WrestlerPanel({
               <div className="label text-[9px] text-slate-500">Asking price</div>
               <div className="stat text-[26px] leading-none text-emerald-300">{moneyFull(row.value)}</div>
             </div>
+          </div>
+          {/* The shape, not just the total. Two wrestlers on the same overall can
+              be completely different performers, and this is where that shows. */}
+          <div className="mt-3 flex justify-center">
+            <Pentagon
+              values={valuesOf(row)}
+              size={236}
+              colour={row.contract?.brand_id === 'RAW' ? 'var(--color-raw)'
+                : row.contract?.brand_id === 'SMACKDOWN' ? 'var(--color-smackdown)'
+                : 'var(--color-gold)'}
+              reasons={row.achievement_reasons}
+            />
           </div>
           <div className="mt-3 pt-3 border-t border-edge-soft text-[11px] text-slate-500 leading-snug">
             Five categories, each out of {CAT_MAX}. Age {ageLabel(row.age, row.age_precision)} applies a{' '}

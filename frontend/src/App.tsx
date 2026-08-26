@@ -8,8 +8,10 @@ import {
 } from './api'
 import { setSoundEnabled } from './sound'
 import { Avatar, StatCell, OverallBadge, BrandChip, Pill } from './ui'
+import { PentagonGlyph, valuesOf } from './Pentagon'
 import WrestlerPanel from './WrestlerPanel'
 import BrandsTab from './BrandsTab'
+import RateTab from './RateTab'
 import BrandTab from './BrandTab'
 import DraftTab from './DraftTab'
 import ShowsTab from './ShowsTab'
@@ -22,11 +24,12 @@ import HomeTab from './HomeTab'
 import RankingsTab from './RankingsTab'
 import ProgressionTab from './ProgressionTab'
 
-type Tab = 'home' | 'roster' | 'draft' | 'freeagents' | 'raw' | 'smackdown' | 'stables' | 'trades' | 'titles' | 'rankings' | 'progression' | 'league' | 'shows' | 'images'
+type Tab = 'home' | 'roster' | 'rate' | 'draft' | 'freeagents' | 'raw' | 'smackdown' | 'stables' | 'trades' | 'titles' | 'rankings' | 'progression' | 'league' | 'shows' | 'images'
 
 const TABS: { key: Tab; label: string; brand?: string }[] = [
   { key: 'home', label: 'Home' },
   { key: 'roster', label: 'Roster' },
+  { key: 'rate', label: 'Rate' },
   { key: 'draft', label: 'Draft' },
   { key: 'freeagents', label: 'Free Agents' },
   { key: 'raw', label: 'Raw', brand: 'RAW' },
@@ -42,9 +45,16 @@ const TABS: { key: Tab; label: string; brand?: string }[] = [
 ]
 type SortKey = 'overall' | 'value' | 'age' | 'name' | 'morale' | CategoryKey
 
-const COLUMNS: { key: SortKey; label: string; numeric: boolean; hint?: string }[] = [
+type Column = { key: SortKey; label: string; numeric: boolean; hint?: string; sortable?: false }
+
+const COLUMNS: Column[] = [
   { key: 'name', label: 'Wrestler', numeric: false },
   { key: 'age', label: 'Age', numeric: true },
+  // A shape has no ordering, so this header does not sort. Marked explicitly
+  // rather than left to reuse the overall key, which would have put a second
+  // sort arrow on the table and quietly re-sorted on a click.
+  { key: 'overall', label: '', numeric: false, sortable: false,
+    hint: 'The five ratings as a shape' },
   ...CATEGORIES.map((c) => ({ key: c.key as SortKey, label: c.label, numeric: true, hint: c.hint })),
   { key: 'morale', label: 'MRL', numeric: true },
   { key: 'overall', label: 'OVR', numeric: true },
@@ -420,15 +430,16 @@ export default function App() {
                     <tr>
                       {COLUMNS.map((c) => (
                         <th
-                          key={c.key}
-                          onClick={() => toggleSort(c.key)}
+                          key={`${c.key}-${c.label}`}
+                          onClick={c.sortable === false ? undefined : () => toggleSort(c.key)}
                           title={c.hint}
-                          className={`label text-[10px] text-slate-500 px-3 py-3
-                                      cursor-pointer select-none hover:text-slate-200
+                          className={`label text-[10px] text-slate-500 px-3 py-3 select-none
+                                      ${c.sortable === false ? '' : 'cursor-pointer hover:text-slate-200'}
                                       ${c.numeric ? 'text-right' : 'text-left'}`}
                         >
                           {c.label}
-                          {sort === c.key && <span className="ml-1 text-gold">{asc ? '▲' : '▼'}</span>}
+                          {c.sortable !== false && sort === c.key
+                            && <span className="ml-1 text-gold">{asc ? '▲' : '▼'}</span>}
                         </th>
                       ))}
                     </tr>
@@ -481,6 +492,18 @@ export default function App() {
                           <td className="px-3 py-2 text-right stat text-[15px] text-slate-400">
                             {ageLabel(r.age, r.age_precision)}
                           </td>
+                          {/* Silhouette before the digits. Scanning 370 rows by
+                              shape is faster than reading five columns of them. */}
+                          <td className="pl-1 pr-0 py-2">
+                            <PentagonGlyph
+                              values={valuesOf(r)}
+                              size={24}
+                              title={`${r.name}: ${CATEGORIES.map((c) => `${c.label} ${r[c.key]}`).join(', ')}`}
+                              colour={r.contract?.brand_id === 'RAW' ? 'var(--color-raw)'
+                                : r.contract?.brand_id === 'SMACKDOWN' ? 'var(--color-smackdown)'
+                                : 'var(--color-gold)'}
+                            />
+                          </td>
                           <StatCell v={r.wrestling} edited={r.edited.wrestling} swing={r.record_swing} />
                           <StatCell v={r.achievements} title={r.achievement_reasons.join(' · ') || 'Nothing won yet in this save'} />
                           <StatCell v={r.popularity} edited={r.edited.popularity} />
@@ -514,6 +537,7 @@ export default function App() {
       )}
 
       {tab === 'home' && <HomeTab onGoto={(t) => setTab(t as Tab)} />}
+      {tab === 'rate' && <RateTab roster={roster} />}
       {tab === 'draft' && <DraftTab roster={roster} />}
       {tab === 'freeagents' && <FreeAgentsTab roster={roster} />}
       {tab === 'raw' && <BrandTab brandId="RAW" roster={roster} />}

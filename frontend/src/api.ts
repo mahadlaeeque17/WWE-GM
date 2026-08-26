@@ -238,6 +238,26 @@ export interface OverrideBody {
 export const saveOverride = (id: number, body: OverrideBody) =>
   req<any>(`/api/wrestler/${id}/override`, { method: 'PUT', body: JSON.stringify(body) })
 
+/**
+ * One cell of the rating sheet. A category left out is UNTOUCHED, not cleared —
+ * unlike saveOverride, which replaces the whole row.
+ */
+export interface RatingEdit {
+  wrestler_id: number
+  wrestling?: number
+  popularity?: number
+  looks?: number
+  personal?: number
+}
+
+/** Many edits, one request, one save. See the endpoint for why that matters. */
+export const saveRatingsBulk = (edits: RatingEdit[]) =>
+  req<{ updated: number }>('/api/ratings/bulk',
+    { method: 'POST', body: JSON.stringify(edits) })
+
+export interface RatingProgress { total: number; looks_todo: number; personal_todo: number }
+export const fetchRatingProgress = () => req<RatingProgress>('/api/ratings/progress')
+
 export const removeWrestler = (id: number, reason?: string) =>
   req<any>(`/api/wrestler/${id}/remove`, { method: 'POST', body: JSON.stringify({ reason: reason ?? null }) })
 
