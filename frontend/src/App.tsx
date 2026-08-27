@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchRoster, fetchBrands, fetchHealth, newGame, scanImages, syncDrive,
@@ -12,6 +12,7 @@ import { PentagonGlyph, valuesOf } from './Pentagon'
 import WrestlerPanel from './WrestlerPanel'
 import BrandsTab from './BrandsTab'
 import RateTab from './RateTab'
+import Nav, { type Tab } from './Nav'
 import BrandTab from './BrandTab'
 import DraftTab from './DraftTab'
 import ShowsTab from './ShowsTab'
@@ -24,25 +25,7 @@ import HomeTab from './HomeTab'
 import RankingsTab from './RankingsTab'
 import ProgressionTab from './ProgressionTab'
 
-type Tab = 'home' | 'roster' | 'rate' | 'draft' | 'freeagents' | 'raw' | 'smackdown' | 'stables' | 'trades' | 'titles' | 'rankings' | 'progression' | 'league' | 'shows' | 'images'
 
-const TABS: { key: Tab; label: string; brand?: string }[] = [
-  { key: 'home', label: 'Home' },
-  { key: 'roster', label: 'Roster' },
-  { key: 'rate', label: 'Rate' },
-  { key: 'draft', label: 'Draft' },
-  { key: 'freeagents', label: 'Free Agents' },
-  { key: 'raw', label: 'Raw', brand: 'RAW' },
-  { key: 'smackdown', label: 'SmackDown', brand: 'SMACKDOWN' },
-  { key: 'stables', label: 'Stables' },
-  { key: 'trades', label: 'Trades' },
-  { key: 'titles', label: 'Titles' },
-  { key: 'rankings', label: 'Rankings' },
-  { key: 'progression', label: 'Progression' },
-  { key: 'league', label: 'League' },
-  { key: 'shows', label: 'Shows' },
-  { key: 'images', label: 'Images' },
-]
 type SortKey = 'overall' | 'value' | 'age' | 'name' | 'morale' | CategoryKey
 
 type Column = { key: SortKey; label: string; numeric: boolean; hint?: string; sortable?: false }
@@ -62,6 +45,13 @@ const COLUMNS: Column[] = [
 ]
 
 type View = 'roster' | 'alumni' | 'hof'
+
+// Every roster row is exactly this tall. Measured, not guessed — if the row
+// layout ever changes this must change with it, or the scrollbar lies.
+const ROW_H = 62
+// Rows rendered beyond the viewport on each side, so a fast scroll does not
+// show blank space before React catches up.
+const OVERSCAN = 8
 
 export default function App() {
   const qc = useQueryClient()
@@ -164,14 +154,49 @@ export default function App() {
 
   const save = health?.save
 
+  // WINDOWING. Only the rows in view are rendered; the rest are two spacer rows
+  // holding the scrollbar honest. Every roster row is exactly ROW_H tall, which
+  // is the property that makes this twenty lines instead of a library.
+  const scrollRef = useRef<HTMLElement>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewH, setViewH] = useState(700)
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onScroll = () => setScrollTop(el.scrollTop)
+    el.addEventListener('scroll', onScroll, { passive: true })
+    const ro = new ResizeObserver(() => setViewH(el.clientHeight))
+    ro.observe(el)
+    setViewH(el.clientHeight)
+    return () => { el.removeEventListener('scroll', onScroll); ro.disconnect() }
+  }, [tab, view])
+
+  // A filter change can leave you scrolled past the end of a now-shorter list.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 })
+    setScrollTop(0)
+  }, [search, view, status, brandFilter, classFilter, sort, asc])
+
+  const firstRow = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN)
+  const lastRow = Math.min(rows.length, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN)
+  const visibleRows = rows.slice(firstRow, lastRow)
+
+  // What the rail should badge. Only the one count that is both actionable and
+  // free — it falls out of the roster we already have, so no extra request. A
+  // badge that costs a round trip to say "0" is not worth having.
+  const navBadges = useMemo(() => ({
+    rate: roster.filter((r) => !r.removed && !r.edited.personal).length || undefined,
+  }) as Partial<Record<Tab, number>>, [roster])
+
   return (
     <div className="h-full flex flex-col">
-      <header className="px-6 py-3 flex items-center gap-5 flex-wrap
+      <header className="px-5 py-2 flex items-center gap-4 shrink-0
                          bg-gradient-to-b from-panel to-transparent"
               style={{ borderBottom: '2px solid transparent',
                        borderImage: 'linear-gradient(90deg, var(--color-raw), var(--color-gold) 50%, var(--color-smackdown)) 1' }}>
         <div className="leading-none">
-          <h1 className="display text-[26px] leading-none tracking-wide">
+          <h1 className="display text-[20px] leading-none tracking-wide">
             <span className="text-slate-100">WWE</span>{' '}
             <span className="sheen">GM 2000</span>
           </h1>
@@ -183,33 +208,6 @@ export default function App() {
               : 'No active save'}
           </p>
         </div>
-
-        <nav className="flex gap-1 ml-4">
-          {TABS.map((t) => {
-            const colour = t.brand ? brands.find((b) => b.brand_id === t.brand)?.colour : undefined
-            const active = tab === t.key
-            return (
-              <button
-                key={t.key}
-                onClick={() => setTab(t.key)}
-                className={`label text-[12px] px-3.5 py-2 rounded transition-all ${
-                  active
-                    ? colour ? 'text-black' : 'bg-gold text-black'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-panel'
-                }`}
-                style={
-                  active
-                    ? colour
-                      ? { background: colour, boxShadow: `0 0 18px ${colour}55` }
-                      : { boxShadow: '0 0 18px rgba(232,185,63,0.35)' }
-                    : colour ? { color: colour } : undefined
-                }
-              >
-                {t.label}
-              </button>
-            )
-          })}
-        </nav>
 
         <div className="flex-1" />
 
@@ -294,6 +292,10 @@ export default function App() {
         </div>
       )}
 
+      <div className="flex-1 flex min-h-0">
+        <Nav tab={tab} onTab={setTab} brands={brands} pending={navBadges} />
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+
       {tab === 'roster' && (
         <>
           <div className="px-6 py-2 flex gap-2 items-center border-b border-edge flex-wrap">
@@ -372,7 +374,7 @@ export default function App() {
           )}
 
           <div className="flex-1 flex min-h-0">
-            <main className="flex-1 overflow-auto">
+            <main ref={scrollRef} className="flex-1 overflow-auto">
               {isLoading && <p className="p-6 text-sm text-slate-500">Loading roster…</p>}
               {error && (
                 <div className="p-6">
@@ -445,7 +447,13 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((r, i) => {
+                    {firstRow > 0 && (
+                      <tr aria-hidden style={{ height: firstRow * ROW_H }} />
+                    )}
+                    {visibleRows.map((r, vi) => {
+                      // The true position in the list, not in the window — this
+                      // is the rank number shown beside the name.
+                      const i = firstRow + vi
                       const bc = brands.find((b) => b.brand_id === r.contract?.brand_id)?.colour
                       const champ = r.game_titles.filter((t) => !t.lost_on)
                       const atRisk = r.promises.some((p) => !p.delivered)
@@ -520,6 +528,9 @@ export default function App() {
                         </tr>
                       )
                     })}
+                    {lastRow < rows.length && (
+                      <tr aria-hidden style={{ height: (rows.length - lastRow) * ROW_H }} />
+                    )}
                   </tbody>
                 </table>
               )}
@@ -551,12 +562,14 @@ export default function App() {
       {tab === 'shows' && <ShowsTab roster={roster} />}
       {tab === 'images' && <ImagesTab />}
 
-      <footer className="border-t border-edge px-6 py-2 text-[11px] text-slate-600">
+      <footer className="border-t border-edge px-6 py-2 text-[11px] text-slate-600 shrink-0">
         {tab === 'roster' && <>{rows.length} shown · </>}
         Each category is out of 20, five summing to 100 · Achievements counts only
         what she has won in THIS save · Wrestling shifts with her win/loss record
         · Looks and Personal are yours · ✎ marks a hand-edited value
       </footer>
+        </div>
+      </div>
     </div>
   )
 }
