@@ -1107,7 +1107,8 @@ def draft_years(tier: str) -> int:
     return FIRST_ROUND_YEARS if tier == "first" else SECOND_ROUND_YEARS
 
 
-def manager_price(con: sqlite3.Connection, wrestler_id: int) -> int:
+def manager_price(con: sqlite3.Connection, wrestler_id: int,
+                  attrs: dict | None = None) -> int:
     """A manager is bought on presence, not workrate.
 
     Popularity carries most of it — promo skill is one of its components, and
@@ -1115,8 +1116,12 @@ def manager_price(con: sqlite3.Connection, wrestler_id: int) -> int:
     for a wrestler: a valet who has guided somebody to a belt is a known
     quantity. WRESTLING IS ABSENT ENTIRELY, which is the whole point of pricing
     managers separately: nobody hires Sunny to work a twenty-minute match.
+
+    `attrs` lets a caller that has already computed her ratings hand them in.
+    Without it the roster endpoint re-derived all five per row — including a full
+    achievements scan each time — for a number it was holding a moment earlier.
     """
-    a = effective_attributes(con, wrestler_id)
+    a = attrs if attrs is not None else effective_attributes(con, wrestler_id)
     presence = (a["popularity"] * 0.50 + a["looks"] * 0.20
                 + a["achievements"] * 0.18 + a["personal"] * 0.12) / A.CAT_MAX
     raw = A.BASE_VALUE * MANAGER_PAY_FACTOR * (presence ** 1.5) * A.age_multiplier(a["age"])
@@ -1566,6 +1571,36 @@ def list_stables(con: sqlite3.Connection) -> dict:
             d["leader_name"] = lr["n"] if lr else None
         factions.append(d)
     return {"tag_teams": teams, "factions": factions}
+
+
+def stables_all(con: sqlite3.Connection) -> dict[int, dict]:
+    """Every wrestler's teams and factions, in two queries rather than 2N.
+
+    The roster endpoint needs this for all 370 at once; calling stables_of per
+    row was 740 statements for what fits in two.
+    """
+    out: dict[int, dict] = {}
+
+    def slot(wid: int) -> dict:
+        return out.setdefault(wid, {"tag_teams": [], "factions": []})
+
+    for r in con.execute(
+            """SELECT m.wrestler_id AS wid, t.id, t.name
+                 FROM tag_team t JOIN tag_team_member m ON m.team_id = t.id
+                WHERE t.active = 1"""):
+        slot(r["wid"])["tag_teams"].append({"id": r["id"], "name": r["name"]})
+
+    for r in con.execute(
+            """SELECT m.wrestler_id AS wid, f.id, f.name,
+                      (f.leader_id = m.wrestler_id) AS is_leader
+                 FROM faction f JOIN faction_member m ON m.faction_id = f.id
+                WHERE f.active = 1"""):
+        slot(r["wid"])["factions"].append(
+            {"id": r["id"], "name": r["name"], "is_leader": r["is_leader"]})
+    return out
+
+
+_NO_STABLES = {"tag_teams": [], "factions": []}
 
 
 def stables_of(con: sqlite3.Connection, wid: int) -> dict:

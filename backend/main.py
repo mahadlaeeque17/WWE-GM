@@ -88,6 +88,15 @@ def conn() -> sqlite3.Connection:
     ensure_ready()
     if not DB.exists():
         raise HTTPException(503, f"database missing at {DB} — run harvester/normalize.py")
+    # Has another container written since we last looked?
+    #
+    # Serverless does not give you one process. Vercel keeps several containers
+    # warm and routes each request to whichever is free, so a save landing on one
+    # was invisible to the next read served by another — the change appeared to
+    # vanish on refresh, and saving twice "fixed" it only because the second
+    # request happened to land somewhere that then served the read. One
+    # conditional GET settles it; a 304 costs a few hundred bytes.
+    store.refresh(DB)
     return _raw_conn()
 
 
@@ -358,6 +367,7 @@ def roster(include_removed: bool = False) -> list[dict]:
         ever_contracted = {r[0] for r in c.execute("SELECT DISTINCT wrestler_id FROM contract")}
         streaks = game.streaks(c)
         bios = game.bios(c)
+        stables = game.stables_all(c)
         # One pass for all 270. Achievements is computed, never stored, so the
         # roster page has to derive it — but three subqueries per row is a page
         # load you can feel, hence the bulk read.
@@ -465,7 +475,7 @@ def roster(include_removed: bool = False) -> list[dict]:
                 "images": images_by.get(r["id"], []),
                 "profile_image_id": profile_of.get(r["id"]),
                 "role": roles.get(r["id"], "wrestler"),
-                "manager_price": game.manager_price(c, r["id"]),
+                "manager_price": game.manager_price(c, r["id"], eff),
                 "hall_of_fame": any(a["kind"] == "hall_of_fame" for a in accolades_by.get(r["id"], [])),
                 "alumni": (r["id"] in ever_contracted and r["id"] not in contracts),
                 "streak": streaks.get(r["id"], 0),
@@ -473,7 +483,7 @@ def roster(include_removed: bool = False) -> list[dict]:
                 "bio": bios.get(r["id"], {}).get("bio"),
                 "accolades": accolades_by.get(r["id"], []),
                 "game_titles": title_reigns.get(r["id"], []),
-                "stables": game.stables_of(c, r["id"]),
+                "stables": stables.get(r["id"], game._NO_STABLES),
             })
         out.sort(key=lambda x: (-x["overall"], -(x["votes"] or 0)))
         return out

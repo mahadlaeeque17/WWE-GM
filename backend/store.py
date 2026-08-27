@@ -193,7 +193,25 @@ TIMEOUT = 30.0
 # save is being written to a filesystem that is about to be deleted".
 EPHEMERAL_HOST = bool(os.environ.get("VERCEL") or os.environ.get("GM2000_EPHEMERAL"))
 
-_last: dict[str, object] = {"hydrated": None, "persisted": None, "error": None}
+_last: dict[str, object] = {"hydrated": None, "persisted": None, "error": None,
+                            "refreshed": None, "refresh_hits": 0}
+
+# The ETag of the remote copy this container's local file matches.
+#
+# THE BUG THIS EXISTS FOR. A container hydrated once at boot and then trusted its
+# own /tmp copy forever. Serverless does not give you one container: Vercel keeps
+# several warm and routes each request to whichever is free. So a save landed on
+# container A, the very next read was served by container B out of the snapshot B
+# took when IT booted, and the change vanished. Save again and it might stick,
+# because that request happened to land on the container that then served the
+# read — which is exactly "sometimes I have to save it twice".
+_etag: str = ""
+_last_check: float = 0.0
+
+# A burst of requests from one page load should not each pay for a check. Short
+# enough that a human refreshing after a save is always inside the window where
+# the check actually happens.
+REFRESH_TTL = 1.0
 
 
 def _copy_writable(src: Path, dst: Path) -> None:
@@ -257,6 +275,7 @@ def status() -> dict:
         "token_var": credentials()["token_var"] or None,
         "store_id_var": _STORE_ID_VAR or None,
         "put_variant": put_variant(),
+        "etag": _etag or None,
         **_last,
     }
 
@@ -491,6 +510,7 @@ def _blob_get() -> bytes | None:
         r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True,
                       headers={"authorization": f"Bearer {credentials()['token']}"})
         if r.status_code < 400:
+            _remember_etag(r.headers.get("etag"))
             return r.content
         if r.status_code != 404:
             last = r
@@ -535,6 +555,12 @@ def _blob_put(data: bytes) -> None:
                       timeout=TIMEOUT)
         if r.status_code < 400:
             _good_variant = access
+            # The ETag of what WE just wrote. Recording it means the next
+            # refresh is a 304 instead of re-downloading our own upload.
+            try:
+                _remember_etag(r.json().get("etag"))
+            except Exception:  # noqa: BLE001
+                _remember_etag(None)
             return
         body = " ".join(r.text[:300].split())
         if attempt == 0 and "access" in body.lower():
@@ -556,6 +582,63 @@ def _get() -> bytes | None:
 
 def _put(data: bytes) -> None:
     (_blob_put if MODE == "blob" else _dir_put)(data)
+
+
+def _remember_etag(tag: str | None) -> None:
+    """Record which remote version the local file now matches."""
+    global _etag, _last_check
+    _etag = (tag or "").strip()
+    _last_check = time.monotonic()
+
+
+def refresh(local: Path) -> bool:
+    """Pull the save again if another container has written since we last looked.
+
+    ONE CONDITIONAL GET, not a list-then-maybe-download. `If-None-Match` with the
+    ETag we already hold answers "has it changed?" and delivers the new bytes in
+    the same round trip: 304 costs a few hundred bytes and settles it, 200 brings
+    the fresh save with it. Doing this per request is what makes a read-after-write
+    correct across containers.
+
+    Returns True if the local file was replaced.
+    """
+    global _etag, _last_check
+    if MODE != "blob" or not enabled():
+        return False
+    now = time.monotonic()
+    if now - _last_check < REFRESH_TTL:
+        return False
+    _last_check = now
+
+    try:
+        access = _good_variant or BLOB_ACCESS
+        url = _direct_url(access) if access == "private" else _public_fresh_url()
+        if not url:
+            return False
+        headers = {"authorization": f"Bearer {credentials()['token']}"}
+        if _etag:
+            headers["if-none-match"] = _etag
+        r = httpx.get(url, timeout=TIMEOUT, follow_redirects=True, headers=headers)
+        if r.status_code == 304:
+            return False
+        if r.status_code == 404:
+            return False
+        if r.status_code >= 400:
+            # Not fatal: the local copy still works, and /api/store/status carries
+            # the reason. Refusing to serve would be worse than serving what we have.
+            _last["error"] = f"refresh failed: HTTP {r.status_code}"
+            return False
+        if not r.content:
+            return False
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(r.content)
+        _etag = r.headers.get("etag", "")
+        _last["refreshed"] = round(time.time(), 0)
+        _last["refresh_hits"] = int(_last.get("refresh_hits") or 0) + 1
+        return True
+    except Exception as e:  # noqa: BLE001
+        _last["error"] = f"refresh failed: {e}"
+        return False
 
 
 def hydrate(local: Path, seed: Path | None = None) -> str:
@@ -584,6 +667,10 @@ def hydrate(local: Path, seed: Path | None = None) -> str:
     if data:
         local.write_bytes(data)
         _last.update(hydrated=round(time.time() - t0, 2), error=None)
+        # Reset the clock so the first request after boot does not immediately
+        # re-check something we have this second.
+        global _last_check
+        _last_check = time.monotonic()
         return f"hydrated {len(data):,} bytes from {MODE} in {_last['hydrated']}s"
 
     src = seed if seed and seed.exists() else (local if local.exists() else None)
