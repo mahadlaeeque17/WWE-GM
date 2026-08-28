@@ -25,24 +25,39 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   saveRatingsBulk, fetchRatingProgress, CAT_MAX,
-  type CategoryKey, type RatingEdit, type RosterRow,
+  type EditableStat, type RatingEdit, type RosterRow,
 } from './api'
 import { Avatar, catTone } from './ui'
 import { PentagonGlyph } from './Pentagon'
 
-/** Columns of the grid, in the order you tab through them. */
-const COLS: { key: CategoryKey; label: string; hint: string }[] = [
-  { key: 'wrestling', label: 'WRS', hint: 'In-ring ability (the base — her record moves what is shown)' },
-  { key: 'popularity', label: 'POP', hint: 'Star power' },
-  { key: 'looks', label: 'LKS', hint: 'Yours' },
-  { key: 'personal', label: 'PER', hint: 'Yours alone' },
+/**
+ * Columns of the grid, in the order you tab through them.
+ *
+ * The first two are ROLE-DEPENDENT. A wrestler is rated on Wrestling and
+ * Popularity; a manager on Mic and Influence, because those are the questions
+ * worth asking about someone whose job is talking and getting a client over. Same
+ * two cells, same keyboard path — the key each one writes to depends on the row.
+ */
+const COLS: {
+  wrestler: EditableStat; manager: EditableStat; label: string; hint: string
+}[] = [
+  { wrestler: 'wrestling', manager: 'mic', label: 'WRS·MIC',
+    hint: 'Wrestlers: in-ring ability (the base — her record moves the shown value). Managers: mic work' },
+  { wrestler: 'popularity', manager: 'influence', label: 'POP·INF',
+    hint: 'Wrestlers: star power. Managers: how much she elevates her client' },
+  { wrestler: 'looks', manager: 'looks', label: 'LKS', hint: 'Yours' },
+  { wrestler: 'personal', manager: 'personal', label: 'PER', hint: 'Yours alone' },
 ]
+
+/** Which key this column writes to for this wrestler. */
+const keyFor = (col: typeof COLS[number], role: string): EditableStat =>
+  role === 'manager' ? col.manager : col.wrestler
 
 type Filter = 'all' | 'unrated' | 'signed'
 
 export default function RateTab({ roster }: { roster: RosterRow[] }) {
   const qc = useQueryClient()
-  const [edits, setEdits] = useState<Record<number, Partial<Record<CategoryKey, number>>>>({})
+  const [edits, setEdits] = useState<Record<number, Partial<Record<EditableStat, number>>>>({})
   const [filter, setFilter] = useState<Filter>('unrated')
   const [search, setSearch] = useState('')
   const [err, setErr] = useState<string | null>(null)
@@ -68,15 +83,15 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
 
   const dirtyCount = Object.values(edits).reduce((n, e) => n + Object.keys(e).length, 0)
 
-  const value = (r: RosterRow, key: CategoryKey): number => {
+  const value = (r: RosterRow, key: EditableStat): number => {
     const e = edits[r.id]?.[key]
     if (e !== undefined) return e
     // Wrestling's cell edits the BASE. Showing the swung value here would mean
     // typing nothing and still saving a different number than was displayed.
-    return key === 'wrestling' ? r.wrestling_base : (r[key] as number)
+    return key === 'wrestling' ? r.wrestling_base : ((r[key] as number) ?? 10)
   }
 
-  const set = (id: number, key: CategoryKey, v: number) => {
+  const set = (id: number, key: EditableStat, v: number) => {
     const clamped = Math.max(0, Math.min(CAT_MAX, v))
     setEdits((d) => ({ ...d, [id]: { ...d[id], [key]: clamped } }))
   }
@@ -219,7 +234,7 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
               <th className="label text-[10px] text-right px-2 py-2 border-b border-edge"
                   title="Achievements — earned in this save, not set here">ACH</th>
               {COLS.map((c) => (
-                <th key={c.key} title={c.hint}
+                <th key={c.label} title={c.hint}
                     className="label text-[10px] text-right px-2 py-2 border-b border-edge">
                   {c.label}
                 </th>
@@ -231,11 +246,18 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
             {rows.map((r, ri) => {
               // The overall as it WOULD be with the pending edits applied, so the
               // number moves as you type rather than after you save.
-              const live = COLS.reduce((sum, c) => sum + value(r, c.key), 0)
-                - value(r, 'wrestling') + r.wrestling + r.achievements
+              const isMgr = r.role === 'manager'
+              const perfA = keyFor(COLS[0], r.role)
+              const perfB = keyFor(COLS[1], r.role)
+              // The overall as it WOULD be with the pending edits applied. For a
+              // wrestler the shown Wrestling includes her record swing, so the
+              // base is swapped out for the swung value; a manager has no swing.
+              const live = (isMgr ? value(r, perfA) : r.wrestling)
+                + r.achievements + value(r, perfB)
+                + value(r, 'looks') + value(r, 'personal')
               const pendingVals = [
-                r.wrestling, r.achievements, value(r, 'popularity'),
-                value(r, 'looks'), value(r, 'personal'),
+                isMgr ? value(r, perfA) : r.wrestling, r.achievements,
+                value(r, perfB), value(r, 'looks'), value(r, 'personal'),
               ]
               const untouched = !r.edited.personal && edits[r.id]?.personal === undefined
               return (
@@ -246,6 +268,12 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
                     <div className="flex items-center gap-2 min-w-0">
                       <Avatar row={r} width={24} />
                       <span className="truncate max-w-[220px]">{r.name}</span>
+                      {isMgr && (
+                        <span className="label text-[9px] text-smackdown shrink-0"
+                              title="Rated on Mic and Influence, not Wrestling and Popularity">
+                          mgr
+                        </span>
+                      )}
                       {untouched && (
                         <span className="label text-[9px] text-slate-600 shrink-0"
                               title="Personal has never been set for her">
@@ -265,10 +293,11 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
                     </span>
                   </td>
                   {COLS.map((c, ci) => {
-                    const v = value(r, c.key)
-                    const dirty = edits[r.id]?.[c.key] !== undefined
+                    const ck = keyFor(c, r.role)
+                    const v = value(r, ck)
+                    const dirty = edits[r.id]?.[ck] !== undefined
                     return (
-                      <td key={c.key} className="px-1 py-1">
+                      <td key={c.label} className="px-1 py-1">
                         <input
                           data-cell={`${ri}-${ci}`}
                           // NOT type=number. Two reasons, both of which bite in a
@@ -277,11 +306,12 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
                           // and a stray scroll over a focused one silently
                           // changes the rating under the cursor.
                           type="text" inputMode="numeric"
-                          aria-label={`${c.label} for ${r.name}`}
+                          aria-label={`${ck} for ${r.name}`}
+                          title={isMgr ? `${ck} (manager)` : ck}
                           value={v}
                           onChange={(e) => {
                             const digits = e.target.value.replace(/\D/g, '')
-                            set(r.id, c.key, digits === '' ? 0 : Number(digits))
+                            set(r.id, ck, digits === '' ? 0 : Number(digits))
                           }}
                           onKeyDown={(e) => onKeyDown(e, ri, ci)}
                           onFocus={(e) => e.currentTarget.select()}
@@ -311,7 +341,9 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
 
       <div className="border-t border-edge px-4 py-2 text-[11px] text-slate-600">
         {rows.length} shown · Achievements is earned in the save, not set here ·
-        Wrestling edits the base, and her win/loss record moves what the roster shows
+        Wrestling edits the base, and her win/loss record moves what the roster
+        shows · a <span className="text-smackdown">mgr</span> row is rated on Mic
+        and Influence instead
         {dirtyCount > 0 && (
           <span className="text-gold"> · {dirtyCount} unsaved</span>
         )}

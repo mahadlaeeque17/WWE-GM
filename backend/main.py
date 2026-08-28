@@ -23,7 +23,9 @@ sys.path.insert(0, str(ROOT / "harvester"))
 import ai  # noqa: E402
 import attributes as A  # noqa: E402
 import booking  # noqa: E402
+import cards  # noqa: E402
 import game  # noqa: E402
+import history  # noqa: E402
 import images  # noqa: E402
 import negotiate  # noqa: E402
 import migrate_ratings  # noqa: E402
@@ -311,11 +313,14 @@ def roster(include_removed: bool = False) -> list[dict]:
                    w.rating, w.votes, w.adj_rating,
                    w.career_start, w.career_end,
                    a.wrestling AS d_wrestling, a.popularity AS d_popularity,
-                   a.looks AS d_looks, a.personal AS d_personal, a.availability,
+                   a.looks AS d_looks, a.personal AS d_personal,
+                   a.mic AS d_mic, a.influence AS d_influence, a.availability,
                    a.alignment AS d_alignment, a.personality AS d_personality,
                    o.wrestling AS o_wrestling, o.popularity AS o_popularity,
                    o.looks AS o_looks, o.personal AS o_personal,
+                   o.mic AS o_mic, o.influence AS o_influence,
                    o.age_at_reset AS o_age, o.display_name, o.notes,
+                   o.role AS o_role, a.role AS d_role,
                    o.alignment AS o_alignment, o.personality AS o_personality,
                    o.draft_class AS o_draft_class,
                    COALESCE(s.sim_matches,0) sim_matches,
@@ -420,8 +425,13 @@ def roster(include_removed: bool = False) -> list[dict]:
                 "looks": r["o_looks"] if r["o_looks"] is not None else r["d_looks"],
                 "personal": (r["o_personal"] if r["o_personal"] is not None
                              else r["d_personal"]),
+                "mic": r["o_mic"] if r["o_mic"] is not None else r["d_mic"],
+                "influence": (r["o_influence"] if r["o_influence"] is not None
+                              else r["d_influence"]),
                 "sim_matches": r["sim_matches"], "sim_wins": r["sim_wins"],
                 "age": age,
+                # The role decides which two stats the overall is built from.
+                "role": r["o_role"] or r["d_role"] or "wrestler",
             }, ach_inputs.get(r["id"]))
 
             out.append({
@@ -441,6 +451,13 @@ def roster(include_removed: bool = False) -> list[dict]:
                 "achievement_reasons": eff["achievement_reasons"],
                 "popularity": eff["popularity"], "looks": eff["looks"],
                 "personal": eff["personal"],
+                # A manager is rated on these two in place of Wrestling and
+                # Popularity. Always sent, because the roster does not know which
+                # screen is about to ask and one column costs nothing.
+                "mic": eff["mic"], "influence": eff["influence"],
+                # Which two the overall was built from — so the card and the
+                # radar can label themselves without re-deriving the role rule.
+                "performance_pair": eff["performance_pair"],
                 "overall": eff["overall"], "value": eff["value"],
                 "age_multiplier": round(A.age_multiplier(age), 3),
                 "edited": {
@@ -448,6 +465,8 @@ def roster(include_removed: bool = False) -> list[dict]:
                     "popularity": r["o_popularity"] is not None,
                     "looks": r["o_looks"] is not None,
                     "personal": r["o_personal"] is not None,
+                    "mic": r["o_mic"] is not None,
+                    "influence": r["o_influence"] is not None,
                     "age": r["o_age"] is not None,
                     "name": bool(r["display_name"]),
                 },
@@ -500,6 +519,9 @@ class Override(BaseModel):
     popularity: int | None = Field(None, ge=0, le=A.CAT_MAX)
     looks: int | None = Field(None, ge=0, le=A.CAT_MAX)
     personal: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    # A manager is scored on these two in place of Wrestling and Popularity.
+    mic: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    influence: int | None = Field(None, ge=0, le=A.CAT_MAX)
     age_at_reset: int | None = Field(None, ge=0, le=120)
     role: str | None = None
     display_name: str | None = None
@@ -516,16 +538,18 @@ def set_override(wid: int, body: Override) -> dict:
         from datetime import datetime, timezone
         c.execute(
             """INSERT INTO attribute_override
-               (wrestler_id, wrestling, popularity, looks, personal,
+               (wrestler_id, wrestling, popularity, looks, personal, mic, influence,
                 age_at_reset, role, display_name, notes, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(wrestler_id) DO UPDATE SET
                  wrestling=excluded.wrestling, popularity=excluded.popularity,
                  looks=excluded.looks, personal=excluded.personal,
+                 mic=excluded.mic, influence=excluded.influence,
                  age_at_reset=excluded.age_at_reset, role=excluded.role,
                  display_name=excluded.display_name, notes=excluded.notes,
                  updated_at=excluded.updated_at""",
             (wid, body.wrestling, body.popularity, body.looks, body.personal,
+             body.mic, body.influence,
              body.age_at_reset, body.role, body.display_name, body.notes,
              datetime.now(timezone.utc).isoformat()),
         )
@@ -542,6 +566,8 @@ class RatingEdit(BaseModel):
     popularity: int | None = Field(None, ge=0, le=A.CAT_MAX)
     looks: int | None = Field(None, ge=0, le=A.CAT_MAX)
     personal: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    mic: int | None = Field(None, ge=0, le=A.CAT_MAX)
+    influence: int | None = Field(None, ge=0, le=A.CAT_MAX)
 
 
 @app.post("/api/ratings/bulk")
@@ -577,7 +603,8 @@ def bulk_ratings(edits: list[RatingEdit] = Body(...)) -> dict:
         for e in edits:
             fields = {k: v for k, v in
                       (("wrestling", e.wrestling), ("popularity", e.popularity),
-                       ("looks", e.looks), ("personal", e.personal))
+                       ("looks", e.looks), ("personal", e.personal),
+                       ("mic", e.mic), ("influence", e.influence))
                       if v is not None}
             if not fields:
                 continue
@@ -1642,6 +1669,83 @@ def news(limit: int = 40) -> list[dict]:
     c = conn()
     try:
         return game.news(c, limit)
+    finally:
+        c.close()
+
+
+# ------------------------------------------------------- history & cards
+
+@app.get("/api/wrestler/{wid}/history")
+def wrestler_history(wid: int) -> dict:
+    """Her whole career: by season, by opponent, by title, by partner."""
+    c = conn()
+    try:
+        return history.career(c, wid)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    finally:
+        c.close()
+
+
+@app.get("/api/head-to-head")
+def head_to_head(a: int, b: int) -> dict:
+    """Every match these two have had against each other, in order."""
+    c = conn()
+    try:
+        return history.head_to_head(c, a, b)
+    finally:
+        c.close()
+
+
+@app.get("/api/wrestler/{wid}/cards")
+def wrestler_cards(wid: int) -> dict:
+    """Her yearly cards, newest first, plus the live one for this season.
+
+    The live card is not stored — the season has not ended, so freezing it now
+    would be a lie. See cards.live_card.
+    """
+    c = conn()
+    try:
+        return {"live": cards.live_card(c, wid), "seasons": cards.for_wrestler(c, wid)}
+    finally:
+        c.close()
+
+
+@app.get("/api/cards/seasons")
+def card_seasons() -> list[dict]:
+    c = conn()
+    try:
+        return cards.seasons_available(c)
+    finally:
+        c.close()
+
+
+@app.get("/api/cards/season/{season}")
+def cards_for_season(season: int, limit: int = 60) -> list[dict]:
+    c = conn()
+    try:
+        return cards.for_season(c, season, max(1, min(400, limit)))
+    finally:
+        c.close()
+
+
+@app.post("/api/cards/mint")
+def mint_cards(season: int | None = Body(None, embed=True),
+               overwrite: bool = Body(False, embed=True)) -> dict:
+    """Mint a season's cards by hand.
+
+    They are minted automatically when the calendar rolls over; this exists so a
+    season already in progress can be looked at, and so a set can be re-cut after
+    a rating correction — which is what `overwrite` is for, and why it is off by
+    default.
+    """
+    c = conn()
+    try:
+        st = current_state(c)
+        if not st:
+            raise HTTPException(400, "no active save")
+        return cards.snapshot(c, season if season is not None else st["season_year"],
+                              overwrite=overwrite)
     finally:
         c.close()
 

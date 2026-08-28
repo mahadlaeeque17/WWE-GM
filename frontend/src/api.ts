@@ -29,6 +29,17 @@ export type CategoryKey = typeof CATEGORIES[number]['key']
 /** Categories you can type a number into. Achievements is earned, not set. */
 export const EDITABLE: CategoryKey[] = ['wrestling', 'popularity', 'looks', 'personal']
 
+/**
+ * Every stat you can type a number into, across both roles.
+ *
+ * Wider than CategoryKey, which only covers a WRESTLER's five. Managers are rated
+ * on Mic and Influence in the two slots where wrestlers get Wrestling and
+ * Popularity, so anything editing ratings generically needs this union.
+ * Achievements is absent by design: it is earned, never set.
+ */
+export type EditableStat =
+  | 'wrestling' | 'popularity' | 'mic' | 'influence' | 'looks' | 'personal'
+
 export interface Contract {
   id: number; wrestler_id: number; brand_id: string
   annual_value: number; years: number; start_year: number; end_year: number
@@ -86,6 +97,11 @@ export interface RosterRow {
   popularity: number
   looks: number
   personal: number
+  /** Managers are rated on these two instead of Wrestling and Popularity. */
+  mic: number
+  influence: number
+  /** The two stats her overall was actually built from, in card order. */
+  performance_pair: [EditableStat, EditableStat]
   overall: number
   value: number
   age_multiplier: number
@@ -231,6 +247,7 @@ export interface OverrideBody {
   // to send. Award the title or the accolade instead.
   wrestling?: number | null; popularity?: number | null
   looks?: number | null; personal?: number | null
+  mic?: number | null; influence?: number | null
   age_at_reset?: number | null; role?: string | null
   display_name?: string | null; notes?: string | null
 }
@@ -248,6 +265,8 @@ export interface RatingEdit {
   popularity?: number
   looks?: number
   personal?: number
+  mic?: number
+  influence?: number
 }
 
 /** Many edits, one request, one save. See the endpoint for why that matters. */
@@ -533,6 +552,99 @@ export interface Nomination {
 export const fetchNominations = (season?: number) =>
   req<Nomination[]>(`/api/awards/nominations${season != null ? `?season=${season}` : ''}`)
 export const crownAward = (nomId: number) => req<any>(`/api/awards/${nomId}/crown`, { method: 'POST' })
+
+// ------------------------------------------------------- cards & career history
+
+/** Managers are scored on MIC/INF where wrestlers get WRS/POP. */
+export type StatKey =
+  | 'wrestling' | 'popularity' | 'mic' | 'influence'
+  | 'achievements' | 'looks' | 'personal'
+
+export interface CardStat {
+  key: StatKey
+  label: string
+  /** The stored value, 0-20 — what the Rate sheet edits. */
+  v20: number
+  /** The same value as a 1-99 card stat. Display only; nothing stores this. */
+  v99: number
+}
+
+export type CardTier = 'bronze' | 'silver' | 'gold' | 'elite'
+
+export interface PlayerCard {
+  wrestler_id: number
+  season_year: number
+  name: string
+  role: 'wrestler' | 'manager' | 'both'
+  overall: number
+  tier: CardTier
+  /** "World champion", "Royal Rumble winner"… or null for a plain card. */
+  special: string | null
+  style: string | null
+  brand_id: string | null
+  /** Her W-L(-D) that season, or null if she did not wrestle. */
+  record: string | null
+  stats: CardStat[]
+  /** True for the current season, which is not minted yet. */
+  live?: boolean
+}
+
+export const fetchWrestlerCards = (id: number) =>
+  req<{ live: PlayerCard; seasons: PlayerCard[] }>(`/api/wrestler/${id}/cards`)
+
+export interface CardSeason { season_year: number; cards: number; specials: number }
+export const fetchCardSeasons = () => req<CardSeason[]>('/api/cards/seasons')
+export const fetchSeasonCards = (season: number, limit = 60) =>
+  req<PlayerCard[]>(`/api/cards/season/${season}?limit=${limit}`)
+export const mintCards = (season?: number, overwrite = false) =>
+  req<{ season: number; minted: number; skipped: number }>('/api/cards/mint',
+    { method: 'POST', body: JSON.stringify({ season, overwrite }) })
+
+export interface SeasonLine {
+  season: number; matches: number; wins: number; losses: number; draws: number
+  ppv: number; titles_won: number; avg_quality: number | null; main_events: number
+}
+export interface VersusLine {
+  wrestler_id: number; name: string; matches: number
+  wins: number; losses: number; draws: number; win_pct: number; last_met: string | null
+}
+export interface ReignLine {
+  id: number; won_on: string; lost_on: string | null; name: string
+  short_name: string | null; tier: string; days: number; ongoing: boolean
+}
+export interface BestMatch {
+  match_id: number; quality: number; held_on: string; show: string
+  title: string | null; stipulation: string | null; won: boolean
+}
+export interface CareerHistory {
+  wrestler_id: number
+  name: string
+  total: {
+    matches: number; wins: number; losses: number; draws: number; ppv: number
+    reigns: number; title_days: number; accolades: number; win_pct: number
+  }
+  seasons: SeasonLine[]
+  versus: VersusLine[]
+  partners: VersusLine[]
+  reigns: ReignLine[]
+  accolades: { kind: string; season_year: number | null; detail: string | null; awarded_on: string; label: string }[]
+  contracts: { brand_id: string; annual_value: number; start_year: number; end_year: number; terminated_on: string | null; origin: string; role: string }[]
+  best_matches: BestMatch[]
+}
+export const fetchHistory = (id: number) => req<CareerHistory>(`/api/wrestler/${id}/history`)
+
+export interface HeadToHead {
+  a: { wrestler_id: number; name: string; wins: number }
+  b: { wrestler_id: number; name: string; wins: number }
+  draws: number
+  meetings: {
+    match_id: number; held_on: string; show: string; is_ppv: boolean
+    quality: number | null; finish: string | null; stipulation: string | null
+    title: string | null; winner_id: number | null
+  }[]
+}
+export const fetchHeadToHead = (a: number, b: number) =>
+  req<HeadToHead>(`/api/head-to-head?a=${a}&b=${b}`)
 
 // ------------------------------------------------------------------- the Rumble
 

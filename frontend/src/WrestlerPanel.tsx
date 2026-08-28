@@ -6,10 +6,11 @@ import {
   removeWrestler, aiPromo, imageUrl, renameWrestler, aiScouting,
   setTags, clearHoldout, PERSONALITIES, fetchPersonalities, addAccolade, removeAccolade,
   fetchAccoladeKinds, saveBio, ageLabel, money, moneyFull, prettyDate, CAT_MAX, OVERALL_MAX, ROLE_LABEL,
-  type RosterRow, type BrandFinance,
+  type RosterRow, type BrandFinance, type EditableStat,
 } from './api'
 import { AlignChip } from './ui'
-import Pentagon, { valuesOf } from './Pentagon'
+import Pentagon, { valuesOf, labelsOf } from './Pentagon'
+import CareerHistory from './CareerHistory'
 import { usePhotos } from './prefs'
 
 /**
@@ -24,36 +25,49 @@ import { usePhotos } from './prefs'
  * her win/loss swing on top, so the two can legitimately differ — which is why
  * the hint says so out loud.
  */
-const EDIT_CATEGORIES = [
+const WRESTLER_CATEGORIES = [
   ['wrestling', 'Wrestling', 'In-ring ability. Her save record shifts the shown value up or down by about 3'],
   ['popularity', 'Popularity', 'Star power: cagematch score, how many people cared, and promo skill'],
   ['looks', 'Looks', 'Yours to set — cagematch has no looks data and never will'],
   ['personal', 'Personal', 'Yours alone. Nothing derives it and nothing suggests a change to it'],
 ] as const
 
-type CatKey = typeof EDIT_CATEGORIES[number][0]
+/**
+ * A MANAGER EDITS A DIFFERENT PAIR, and the panel has to agree with her card.
+ * Her radar and her card both read MIC and INF, so sliders labelled Wrestling
+ * and Popularity would be editing numbers nothing else shows her.
+ */
+const MANAGER_CATEGORIES = [
+  ['mic', 'Mic', 'Promo work — the thing she is actually hired for'],
+  ['influence', 'Influence', 'How much she elevates whoever she stands beside'],
+  ['looks', 'Looks', 'Yours to set — cagematch has no looks data and never will'],
+  ['personal', 'Personal', 'Yours alone. Nothing derives it and nothing suggests a change to it'],
+] as const
+
+type CatKey = EditableStat
 
 export default function WrestlerPanel({
   row, brands, onClose,
 }: { row: RosterRow; brands: BrandFinance[]; onClose: () => void }) {
   const qc = useQueryClient()
+  const EDIT_CATEGORIES = row.role === 'manager'
+    ? MANAGER_CATEGORIES : WRESTLER_CATEGORIES
   // Wrestling seeds from wrestling_base, NOT from the shown wrestling: opening
   // the panel and pressing save must not bake her current hot streak into the
   // permanent value.
-  const [draft, setDraft] = useState<Record<CatKey | 'age', number | null>>({
-    wrestling: row.wrestling_base, popularity: row.popularity,
-    looks: row.looks, personal: row.personal, age: row.age,
+  const seed = (r: RosterRow): Record<string, number | null> => ({
+    wrestling: r.wrestling_base, popularity: r.popularity,
+    mic: r.mic, influence: r.influence,
+    looks: r.looks, personal: r.personal, age: r.age,
   })
+  const [draft, setDraft] = useState<Record<string, number | null>>(seed(row))
   const [years, setYears] = useState(2)
   const [err, setErr] = useState<string | null>(null)
 
   // Re-seed the editor when a different wrestler is selected, otherwise the
   // previous wrestler's numbers linger in the inputs.
   useEffect(() => {
-    setDraft({
-      wrestling: row.wrestling_base, popularity: row.popularity,
-      looks: row.looks, personal: row.personal, age: row.age,
-    })
+    setDraft(seed(row))
     setTouched(new Set())
     setErr(null)
   }, [row.id])
@@ -83,10 +97,16 @@ export default function WrestlerPanel({
     mutationFn: () => {
       // Keep fields already overridden from a previous session, or saving a new
       // edit would wipe them.
-      const keep = (k: CatKey | 'age') => touched.has(k) || row.edited[k]
+      const keep = (k: string) => touched.has(k as CatKey | 'age')
+        || (row.edited as Record<string, boolean>)[k]
+      // Every key is sent, not just this role's four: a `both` wrestler can be
+      // looked at either way, and dropping the other pair would clear whatever
+      // had been set for her in the other role.
       return saveOverride(row.id, {
         wrestling: keep('wrestling') ? draft.wrestling : null,
         popularity: keep('popularity') ? draft.popularity : null,
+        mic: keep('mic') ? draft.mic : null,
+        influence: keep('influence') ? draft.influence : null,
         looks: keep('looks') ? draft.looks : null,
         personal: keep('personal') ? draft.personal : null,
         age_at_reset: keep('age') ? draft.age : null,
@@ -194,7 +214,8 @@ export default function WrestlerPanel({
   // slider edits the base, so comparing to the swung value would mark the panel
   // dirty the moment a wrestler goes on a run.
   const dirty = EDIT_CATEGORIES.some(([k]) =>
-    draft[k] !== (k === 'wrestling' ? row.wrestling_base : row[k])
+    draft[k] !== (k === 'wrestling' ? row.wrestling_base
+      : (row as unknown as Record<string, number>)[k])
   ) || draft.age !== row.age
   const anyEdited = Object.values(row.edited).some(Boolean)
 
@@ -420,6 +441,7 @@ export default function WrestlerPanel({
           <div className="mt-3 flex justify-center">
             <Pentagon
               values={valuesOf(row)}
+              labels={labelsOf(row)}
               size={236}
               colour={row.contract?.brand_id === 'RAW' ? 'var(--color-raw)'
                 : row.contract?.brand_id === 'SMACKDOWN' ? 'var(--color-smackdown)'
@@ -435,6 +457,8 @@ export default function WrestlerPanel({
             {row.age_multiplier >= 1 ? 'youth premium' : 'veteran discount'}.
           </div>
         </section>
+
+        <CareerHistory row={row} />
 
         {/* -------- editable ratings -------- */}
         <section className="mb-5">
@@ -487,7 +511,8 @@ export default function WrestlerPanel({
               <div className="flex justify-between text-xs mb-1">
                 <span className="label text-[10px] text-slate-400">
                   {label}
-                  {row.edited[key] && <span className="ml-1.5 text-gold" title="hand-edited">✎</span>}
+                  {(row.edited as Record<string, boolean>)[key]
+                    && <span className="ml-1.5 text-gold" title="hand-edited">✎</span>}
                   {key === 'wrestling' && Math.abs(row.record_swing) >= 0.5 && (
                     <span
                       className={`ml-1.5 normal-case tracking-normal ${row.record_swing > 0 ? 'text-emerald-400' : 'text-blood'}`}

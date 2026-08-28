@@ -267,9 +267,15 @@ def effective_attributes(con: sqlite3.Connection, wrestler_id: int,
           COALESCE(o.popularity, a.popularity) AS popularity,
           COALESCE(o.looks,      a.looks)      AS looks,
           COALESCE(o.personal,   a.personal)   AS personal,
+          -- A manager is scored on these two instead of Wrestling/Popularity.
+          -- Always fetched, because a `both` wrestler can be looked at either
+          -- way and one query is cheaper than knowing in advance which.
+          COALESCE(o.mic,        a.mic)        AS mic,
+          COALESCE(o.influence,  a.influence)  AS influence,
           COALESCE(o.age_at_reset, w.age_at_reset) AS age,
           COALESCE(o.alignment,  a.alignment)  AS alignment,
           COALESCE(o.personality, a.personality) AS personality,
+          COALESCE(o.role,       a.role)       AS role,
           COALESCE(s.sim_matches, 0)           AS sim_matches,
           COALESCE(s.sim_wins, 0)              AS sim_wins
         FROM wrestler w
@@ -296,15 +302,25 @@ def with_derived(d: dict, ach_inputs: dict | None) -> dict:
     this arithmetic instead of reimplementing it — the old duplicate in main.py
     was the reason a rating could read one way on the roster page and another on
     the wrestler panel.
+
+    ROLE-AWARE, and it has to be. A manager is scored on Mic and Influence where a
+    wrestler gets Wrestling and Popularity, so totalling the wrestler five for
+    everyone gave a manager one overall on the roster and a different one on her
+    own card. Same bug the duplicate arithmetic used to cause, one layer up.
     """
     d["wrestling"] = A.wrestling_live(d["wrestling_base"], d["sim_wins"], d["sim_matches"])
     d["record_swing"] = round(A.record_swing(d["sim_wins"], d["sim_matches"]), 1)
     d["achievements"] = achievement_score(ach_inputs)
     d["achievement_reasons"] = achievement_reasons(ach_inputs)
-    d["overall"] = A.overall(d["wrestling"], d["achievements"], d["popularity"],
+
+    a_key, b_key = A.performance_pair(d.get("role") or "wrestler")
+    d["overall"] = A.overall(d[a_key], d["achievements"], d[b_key],
                              d["looks"], d["personal"])
-    d["value"] = A.contract_value(d["wrestling"], d["achievements"], d["popularity"],
+    d["value"] = A.contract_value(d[a_key], d["achievements"], d[b_key],
                                   d["looks"], d["personal"], d["age"])
+    # Which two the overall was actually built from, so the UI can label a card
+    # or a chart without re-deriving the role rule.
+    d["performance_pair"] = [a_key, b_key]
     return d
 
 
@@ -2427,6 +2443,11 @@ def advance_season(con: sqlite3.Connection) -> dict:
 
     # Year-end awards: nominate the season's bests for the GM to crown.
     nominations = generate_nominations(con, old_season)
+    # Freeze the season that just ended as cards, before anything else can move
+    # a rating. This is the moment the snapshot has to happen — a card minted
+    # later would be describing a roster that had already changed.
+    import cards  # noqa: PLC0415 — imported here to keep game.py standalone
+    minted = cards.snapshot(con, old_season)
     log_event(con, "season", f"Season {old_season} is in the books — welcome to {new_season}.",
               None, "📅")
     if expired:
@@ -2442,4 +2463,5 @@ def advance_season(con: sqlite3.Connection) -> dict:
             "ppv": ppv_for_month(1, new_season), "rolled_season": True,
             "rolled_forward": len(leftovers),
             "broken_promises": broken_promises, "award_nominations": nominations,
+            "cards_minted": minted.get("minted", 0),
             "ai": ai}

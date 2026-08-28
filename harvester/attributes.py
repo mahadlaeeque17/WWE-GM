@@ -50,6 +50,88 @@ CAT_MAX = 20
 CATEGORIES = ("wrestling", "achievements", "popularity", "looks", "personal")
 OVERALL_MAX = CAT_MAX * len(CATEGORIES)
 
+# ---------------------------------------------------------- role-dependent stats
+#
+# A MANAGER IS SCORED ON A DIFFERENT PAIR. Wrestling and Popularity are the wrong
+# questions to ask about someone whose job is talking and getting her client over,
+# so those two slots become Mic and Influence. Achievements, Looks and Personal
+# carry over unchanged — so a manager card is still five out of twenty.
+#
+# This is exactly what FIFA does with goalkeepers: the same scale and the same
+# card, with a different set of names for the two stats that describe the job.
+# `manager_price` already ignored Wrestling, so the money side of the game has
+# quietly agreed with this all along.
+# POSITIONALLY MIRRORS `CATEGORIES`, and that is load-bearing. Slot 0 and slot 2
+# are the two role-dependent stats; slots 1, 3 and 4 are the same for everyone.
+# The first version ordered this tuple differently and code indexing [0] and [1]
+# for "the two performance stats" then read `achievements` as a wrestler's second
+# stat — a card that printed ACH twice and no POP at all. Keeping the shapes
+# identical means the same index means the same thing whoever you are looking at.
+MANAGER_CATEGORIES = ("mic", "achievements", "influence", "looks", "personal")
+
+# The two slots that change with the role, by index into either tuple above.
+PERFORMANCE_SLOTS = (0, 2)
+
+# Labels for the card face, in display order. Three letters because that is what
+# fits under an overall, and because it is what the reference card does.
+STAT_LABELS = {
+    "wrestling": "WRS", "popularity": "POP", "mic": "MIC", "influence": "INF",
+    "achievements": "ACH", "looks": "LKS", "personal": "PER",
+}
+
+
+def categories_for(role: str) -> tuple[str, ...]:
+    """Which five apply. A `both` wrestler is rated as a wrestler.
+
+    `both` deliberately falls to the wrestler set rather than getting a sixth
+    stat or a third card type: she can be drafted into either pool, but she is
+    someone who wrestles, and a card has room for five.
+    """
+    return MANAGER_CATEGORIES if role == "manager" else CATEGORIES
+
+
+def performance_pair(role: str) -> tuple[str, str]:
+    """The two stats that describe the JOB — (Wrestling, Popularity) for a
+    wrestler, (Mic, Influence) for a manager. Named rather than indexed, so a
+    caller cannot get the pair wrong by assuming a tuple order."""
+    cats = categories_for(role)
+    return cats[PERFORMANCE_SLOTS[0]], cats[PERFORMANCE_SLOTS[1]]
+
+
+# ---------------------------------------------------------------- card display
+#
+# The card shows stats out of 99 while everything you EDIT stays out of 20.
+#
+# That split is deliberate. The 0-20 scale is what makes hand-rating 370
+# wrestlers tractable — twenty steps is a judgement a person can actually make,
+# ninety-nine is a false precision that invites fiddling. But a card wants FIFA's
+# numbers, and the overall is already 0-100. So the conversion lives here, in one
+# function, at the display edge only. Nothing is stored out of 99.
+CARD_STAT_MAX = 99
+
+
+def to99(v: int) -> int:
+    """A 0-20 category as a 1-99 card stat.
+
+    Floors at 1 rather than 0: a card with a 0 on it reads as missing data, and
+    every one of these is a real (if low) rating.
+    """
+    return max(1, min(CARD_STAT_MAX, round(v / CAT_MAX * CARD_STAT_MAX)))
+
+
+# Card tiers, straight off the overall, so the colour says where she sits before
+# you read a number. Boundaries are set against the ACTUAL day-one distribution
+# (18-65, median 44) rather than copied from FIFA, where a 75 is unremarkable —
+# on this roster a 75 is a decade of accumulated Achievements.
+TIERS = ((70, "elite"), (56, "gold"), (42, "silver"), (0, "bronze"))
+
+
+def tier_for(overall: int) -> str:
+    for floor, name in TIERS:
+        if overall >= floor:
+            return name
+    return "bronze"
+
 # The two the GM owns outright. Listed rather than assumed, because the
 # progression engine has to know what it is not allowed to touch.
 GM_OWNED = ("looks", "personal")

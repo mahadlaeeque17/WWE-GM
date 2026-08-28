@@ -19,6 +19,22 @@ import { CAT_MAX, CATEGORIES, type RosterRow } from './api'
 const AXES = CATEGORIES.map((c) => c.full)
 const ACH_INDEX = CATEGORIES.findIndex((c) => c.key === 'achievements')
 
+/**
+ * Axis labels for a row, which depend on her ROLE. A manager's two performance
+ * axes are Mic and Influence, not Wrestling and Popularity — the shape means
+ * nothing if it is labelled with stats she is not scored on.
+ */
+const LABEL_FOR: Record<string, string> = {
+  wrestling: 'WRS', popularity: 'POP', mic: 'MIC', influence: 'INF',
+  achievements: 'ACH', looks: 'LKS', personal: 'PER',
+}
+
+export function labelsOf(row: RosterRow): string[] {
+  const [a, b] = row.performance_pair ?? ['wrestling', 'popularity']
+  return CATEGORIES.map((c, i) =>
+    i === 0 ? LABEL_FOR[a] : i === 2 ? LABEL_FOR[b] : c.label)
+}
+
 /** Point up, then clockwise, so Wrestling sits at the apex. */
 function point(i: number, radius: number, cx: number, cy: number) {
   const a = -Math.PI / 2 + (i * 2 * Math.PI) / AXES.length
@@ -37,7 +53,12 @@ function polygon(vals: number[], r: number, cx: number, cy: number) {
 }
 
 export function valuesOf(row: RosterRow): number[] {
-  return CATEGORIES.map((c) => row[c.key] as number)
+  // Slots 0 and 2 are role-dependent; the other three are the same for everyone.
+  const [a, b] = row.performance_pair ?? ['wrestling', 'popularity']
+  return CATEGORIES.map((c, i) => {
+    const key = i === 0 ? a : i === 2 ? b : c.key
+    return (row[key] as number) ?? 0
+  })
 }
 
 /** The small one — a silhouette for a table row. No text, no gridlines. */
@@ -61,8 +82,12 @@ export function PentagonGlyph({
 
 /** The big one — labelled axes, rings at 5/10/15/20, and a marker per point. */
 export default function Pentagon({
-  values, size = 250, colour = 'var(--color-gold)', reasons = [],
-}: { values: number[]; size?: number; colour?: string; reasons?: string[] }) {
+  values, size = 250, colour = 'var(--color-gold)', reasons = [], labels,
+}: {
+  values: number[]; size?: number; colour?: string; reasons?: string[]
+  /** Override the axis labels — a manager's two differ. See labelsOf. */
+  labels?: string[]
+}) {
   // Room for the labels, which sit outside the outer ring.
   const pad = 42
   const c = size / 2
@@ -94,7 +119,7 @@ export default function Pentagon({
               fill={isAch ? 'var(--color-gold)' : 'var(--color-slate-400, #94a3b8)'}
               style={{ fontSize: 9.5 }}
             >
-              {CATEGORIES[i].label} {values[i]}
+              {(labels ?? CATEGORIES.map((c) => c.label))[i]} {values[i]}
             </text>
           </g>
         )

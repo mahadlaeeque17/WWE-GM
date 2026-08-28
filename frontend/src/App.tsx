@@ -12,6 +12,7 @@ import { PentagonGlyph, valuesOf } from './Pentagon'
 import WrestlerPanel from './WrestlerPanel'
 import BrandsTab from './BrandsTab'
 import RateTab from './RateTab'
+import CardsTab from './CardsTab'
 import Nav, { type Tab } from './Nav'
 import BrandTab from './BrandTab'
 import DraftTab from './DraftTab'
@@ -549,6 +550,7 @@ export default function App() {
 
       {tab === 'home' && <HomeTab onGoto={(t) => setTab(t as Tab)} />}
       {tab === 'rate' && <RateTab roster={roster} />}
+      {tab === 'cards' && <CardsTab roster={roster} />}
       {tab === 'draft' && <DraftTab roster={roster} />}
       {tab === 'freeagents' && <FreeAgentsTab roster={roster} />}
       {tab === 'raw' && <BrandTab brandId="RAW" roster={roster} />}

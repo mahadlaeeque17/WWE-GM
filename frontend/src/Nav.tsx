@@ -16,7 +16,7 @@ import { useEffect, useState } from 'react'
 export type Tab =
   | 'home' | 'roster' | 'rate' | 'draft' | 'freeagents'
   | 'raw' | 'smackdown' | 'stables' | 'trades' | 'league'
-  | 'shows' | 'titles' | 'rankings' | 'progression' | 'images'
+  | 'shows' | 'titles' | 'rankings' | 'progression' | 'images' | 'cards'
 
 type Item = { key: Tab; label: string; icon: string; brand?: string; hint?: string }
 type Group = { title: string; items: Item[] }
@@ -33,6 +33,7 @@ export const GROUPS: Group[] = [
   { title: 'Talent', items: [
     { key: 'roster', label: 'Roster', icon: '☰', hint: 'Everyone, sortable by any rating' },
     { key: 'rate', label: 'Rate', icon: '✎', hint: 'Set Looks and Personal across the roster' },
+    { key: 'cards', label: 'Cards', icon: '🂠', hint: "Every season's set of player cards" },
     { key: 'draft', label: 'Draft', icon: '⇩', hint: 'Build your brands' },
     { key: 'freeagents', label: 'Free Agents', icon: '✚', hint: 'Sign anyone unsigned' },
   ]},

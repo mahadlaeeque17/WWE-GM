@@ -84,13 +84,27 @@ def main() -> int:
     print("scale")
     ach = game.achievement_inputs(con)
     rows = [game.effective_attributes(con, w, ach.get(w)) for w in ids.values()]
-    bad = [(c, e[c]) for e in rows for c in A.CATEGORIES if not 0 <= e[c] <= A.CAT_MAX]
+    # Role-aware: a MANAGER's five are Mic/Achievements/Influence/Looks/Personal,
+    # because Wrestling and Popularity are the wrong questions to ask about
+    # someone whose job is talking. Summing the wrestler five for everyone is
+    # what this check used to do, and it flagged all thirteen managers.
+    def five(e):
+        return A.categories_for(e.get("role") or "wrestler")
+
+    bad = [(c, e[c]) for e in rows for c in five(e) if not 0 <= e[c] <= A.CAT_MAX]
     check(f"every category of all {len(rows)} wrestlers is within 0-{A.CAT_MAX}",
           not bad, f"out of range: {bad[:4]}")
-    mismatch = [e for e in rows
-                if e["overall"] != sum(e[c] for c in A.CATEGORIES)]
-    check("overall equals the five categories added up", not mismatch,
+    mismatch = [e for e in rows if e["overall"] != sum(e[c] for c in five(e))]
+    check("overall equals her own five categories added up", not mismatch,
           f"{len(mismatch)} rows disagree")
+    mgrs = [e for e in rows if (e.get("role") or "") == "manager"]
+    check(f"a manager is scored on Mic and Influence ({len(mgrs)} of them)",
+          all(e["performance_pair"] == ["mic", "influence"] for e in mgrs)
+          and len(mgrs) > 0,
+          str([e["performance_pair"] for e in mgrs[:3]]))
+    check("a wrestler is still scored on Wrestling and Popularity",
+          all(e["performance_pair"] == ["wrestling", "popularity"]
+              for e in rows if (e.get("role") or "wrestler") != "manager"))
     check("five categories, 20 each, 100 total",
           A.CAT_MAX == 20 and len(A.CATEGORIES) == 5 and A.OVERALL_MAX == 100,
           f"{len(A.CATEGORIES)} × {A.CAT_MAX} = {A.OVERALL_MAX}")
