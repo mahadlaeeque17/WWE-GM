@@ -176,6 +176,89 @@ def seasons_available(con: sqlite3.Connection) -> list[dict]:
              FROM rating_card GROUP BY season_year ORDER BY season_year DESC""")]
 
 
+# How many cards a Team of the Year holds. Not eleven — this is not football, and
+# a wrestling roster's shape is different: a handful of headliners, a manager, and
+# the champion whether or not she out-rates them.
+TOTY_WRESTLERS = 6
+TOTY_MANAGERS = 1
+
+
+def team_of_season(con: sqlite3.Connection, season: int) -> dict:
+    """The season's best cards, as a set rather than a leaderboard.
+
+    Picked on overall, but with two deliberate overrides, because a pure top-six
+    tells you nothing you could not get by sorting:
+
+      the champion is always in it, even if her overall is not top six. Holding
+      the world title IS the season, and a set that omits the champion is wrong
+      about what happened.
+
+      a manager gets her own slot rather than competing on a scale she is not on.
+      Managers are scored on Mic and Influence, so ranking them against wrestlers
+      by overall compares two different measurements.
+    """
+    rows = [_shape(con, r) for r in con.execute(
+        "SELECT * FROM rating_card WHERE season_year=? ORDER BY overall DESC",
+        (season,))]
+    if not rows:
+        return {"season": season, "wrestlers": [], "managers": [],
+                "champions": [], "note": "no cards minted for that season"}
+
+    wrestlers = [c for c in rows if c["role"] != "manager"]
+    managers = [c for c in rows if c["role"] == "manager"]
+
+    champs = [c for c in wrestlers if c["special"] == "World champion"]
+    picked = list(champs[:TOTY_WRESTLERS])
+    for c in wrestlers:
+        if len(picked) >= TOTY_WRESTLERS:
+            break
+        if c not in picked:
+            picked.append(c)
+    picked.sort(key=lambda c: -c["overall"])
+
+    return {
+        "season": season,
+        "wrestlers": picked,
+        "managers": managers[:TOTY_MANAGERS],
+        "champions": [c["name"] for c in champs],
+    }
+
+
+def best_ever(con: sqlite3.Connection, limit: int = 40) -> list[dict]:
+    """Each wrestler's HIGHEST card, ranked — the all-time set.
+
+    One card per wrestler, not one row per season, which is the point: a ten-year
+    career should appear once, at its peak, rather than filling the list with ten
+    versions of the same person.
+    """
+    return [_shape(con, r) for r in con.execute(
+        """SELECT c.* FROM rating_card c
+            JOIN (SELECT wrestler_id, MAX(overall) AS best
+                    FROM rating_card GROUP BY wrestler_id) m
+              ON m.wrestler_id = c.wrestler_id AND m.best = c.overall
+           GROUP BY c.wrestler_id
+           ORDER BY c.overall DESC, c.season_year
+           LIMIT ?""", (limit,))]
+
+
+def progression(con: sqlite3.Connection, wid: int) -> list[dict]:
+    """Her overall and five stats by season — the series behind the graph.
+
+    Comes straight off the minted cards, so the chart cannot disagree with the
+    cards: it IS the cards, read as a line instead of a shelf.
+    """
+    out = []
+    for r in con.execute(
+            "SELECT * FROM rating_card WHERE wrestler_id=? ORDER BY season_year",
+            (wid,)):
+        c = _shape(con, r)
+        out.append({"season_year": c["season_year"], "overall": c["overall"],
+                    "tier": c["tier"], "special": c["special"],
+                    "record": c["record"],
+                    "stats": {st["key"]: st["v20"] for st in c["stats"]}})
+    return out
+
+
 def live_card(con: sqlite3.Connection, wid: int) -> dict:
     """Her card AS OF RIGHT NOW — not stored, just shaped the same way.
 

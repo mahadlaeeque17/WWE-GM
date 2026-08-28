@@ -80,13 +80,24 @@ export function PentagonGlyph({
   )
 }
 
-/** The big one — labelled axes, rings at 5/10/15/20, and a marker per point. */
+/**
+ * The big one — labelled axes, rings at 5/10/15/20, and a marker per point.
+ *
+ * `overlay` draws a SECOND shape on the same axes, which is the whole point of
+ * comparing two cards: two overalls in the fifties can be completely different
+ * performers, and the difference is a shape, not a number. Drawn under the
+ * primary and without markers so the one you are looking at stays legible.
+ */
 export default function Pentagon({
   values, size = 250, colour = 'var(--color-gold)', reasons = [], labels,
+  overlay, overlayColour = 'var(--color-smackdown)',
 }: {
   values: number[]; size?: number; colour?: string; reasons?: string[]
   /** Override the axis labels — a manager's two differ. See labelsOf. */
   labels?: string[]
+  /** A second series on the same axes, for comparing two wrestlers or years. */
+  overlay?: number[]
+  overlayColour?: string
 }) {
   // Room for the labels, which sit outside the outer ring.
   const pad = 42
@@ -120,10 +131,17 @@ export default function Pentagon({
               style={{ fontSize: 9.5 }}
             >
               {(labels ?? CATEGORIES.map((c) => c.label))[i]} {values[i]}
+              {overlay ? ` / ${overlay[i]}` : ''}
             </text>
           </g>
         )
       })}
+
+      {overlay && (
+        <polygon points={polygon(overlay, r, c, c)}
+                 fill={overlayColour} fillOpacity={0.12} stroke={overlayColour}
+                 strokeWidth={1.6} strokeDasharray="4 3" strokeLinejoin="round" />
+      )}
 
       <polygon points={polygon(values, r, c, c)}
                fill={colour} fillOpacity={0.18} stroke={colour}

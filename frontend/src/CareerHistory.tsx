@@ -20,10 +20,59 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  fetchHistory, fetchWrestlerCards, fetchHeadToHead, imageUrl,
-  money, prettyDate, type RosterRow,
+  fetchHistory, fetchWrestlerCards, fetchHeadToHead, fetchProgression, imageUrl,
+  money, prettyDate, OVERALL_MAX, type ProgressionPoint, type RosterRow,
 } from './api'
 import Card from './Card'
+
+/**
+ * Overall by season, as a line.
+ *
+ * Reads the MINTED CARDS rather than recomputing anything, so the graph cannot
+ * disagree with the cards above it — it is the same numbers, drawn as a shape
+ * instead of a shelf. A season with a ribbon gets a gold marker, which is what
+ * turns a line into a story: you can see the year she won the belt.
+ */
+function OverallGraph({ points }: { points: ProgressionPoint[] }) {
+  if (points.length < 2) return null
+  const W = 260, H = 62, PAD = 6
+  const lo = Math.min(...points.map((p) => p.overall)) - 4
+  const hi = Math.max(...points.map((p) => p.overall)) + 4
+  const span = Math.max(1, hi - lo)
+  const x = (i: number) => PAD + (i / (points.length - 1)) * (W - PAD * 2)
+  const y = (v: number) => H - PAD - ((v - lo) / span) * (H - PAD * 2)
+  const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.overall).toFixed(1)}`).join(' ')
+
+  return (
+    <div className="mt-3">
+      <div className="label text-[9px] text-slate-600 mb-1">
+        Overall by season · {points[0].overall} → {points[points.length - 1].overall}
+      </div>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ maxWidth: W }}
+           role="img" aria-label={points.map((p) => `${p.season_year}: ${p.overall}`).join(', ')}>
+        <path d={`${path} L${x(points.length - 1).toFixed(1)},${H - PAD} L${x(0).toFixed(1)},${H - PAD} Z`}
+              fill="var(--color-gold)" fillOpacity={0.10} />
+        <path d={path} fill="none" stroke="var(--color-gold)" strokeWidth={1.6}
+              strokeLinejoin="round" />
+        {points.map((p, i) => (
+          <circle key={p.season_year} cx={x(i).toFixed(1)} cy={y(p.overall).toFixed(1)}
+                  r={p.special ? 3.4 : 2.2}
+                  fill={p.special ? 'var(--color-gold)' : 'var(--color-panel)'}
+                  stroke="var(--color-gold)" strokeWidth={1.2}>
+            <title>
+              {p.season_year}: {p.overall}/{OVERALL_MAX}
+              {p.record ? ` · ${p.record}` : ''}{p.special ? ` · ${p.special}` : ''}
+            </title>
+          </circle>
+        ))}
+      </svg>
+      <div className="flex justify-between text-[9px] text-slate-600 mt-0.5" style={{ maxWidth: W }}>
+        <span>{points[0].season_year}</span>
+        <span>{points[points.length - 1].season_year}</span>
+      </div>
+    </div>
+  )
+}
 
 type Section = 'cards' | 'record' | 'versus' | 'honours'
 
@@ -43,6 +92,10 @@ export default function CareerHistory({ row }: { row: RosterRow }) {
   })
   const { data: cards } = useQuery({
     queryKey: ['cards', row.id], queryFn: () => fetchWrestlerCards(row.id),
+    enabled: section === 'cards',
+  })
+  const { data: progression = [] } = useQuery({
+    queryKey: ['progression', row.id], queryFn: () => fetchProgression(row.id),
     enabled: section === 'cards',
   })
   const { data: h2h } = useQuery({
@@ -99,6 +152,8 @@ export default function CareerHistory({ row }: { row: RosterRow }) {
           )}
         </div>
       )}
+
+      {section === 'cards' && <OverallGraph points={progression} />}
 
       {/* ------------------------------------------------------------ record */}
       {section === 'record' && hist && hist.total.matches > 0 && (

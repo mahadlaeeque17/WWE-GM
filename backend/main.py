@@ -1711,6 +1711,46 @@ def wrestler_cards(wid: int) -> dict:
         c.close()
 
 
+@app.get("/api/rivalries")
+def rivalries(limit: int = 40, season: int | None = None) -> list[dict]:
+    """The save's real feuds, ranked — see history.RIVALRY_WEIGHTS for the sort."""
+    c = conn()
+    try:
+        return history.rivalries(c, max(1, min(200, limit)), season)
+    finally:
+        c.close()
+
+
+@app.get("/api/cards/team/{season}")
+def team_of_season(season: int) -> dict:
+    """That season's set: the best cards, with the champion always included."""
+    c = conn()
+    try:
+        return cards.team_of_season(c, season)
+    finally:
+        c.close()
+
+
+@app.get("/api/cards/best-ever")
+def best_ever_cards(limit: int = 40) -> list[dict]:
+    """Each wrestler's highest card, ranked. One row per person, at her peak."""
+    c = conn()
+    try:
+        return cards.best_ever(c, max(1, min(200, limit)))
+    finally:
+        c.close()
+
+
+@app.get("/api/wrestler/{wid}/progression")
+def card_progression(wid: int) -> list[dict]:
+    """Her overall and five stats by season — the series behind the graph."""
+    c = conn()
+    try:
+        return cards.progression(c, wid)
+    finally:
+        c.close()
+
+
 @app.get("/api/cards/seasons")
 def card_seasons() -> list[dict]:
     c = conn()

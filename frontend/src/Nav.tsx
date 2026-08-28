@@ -17,6 +17,7 @@ export type Tab =
   | 'home' | 'roster' | 'rate' | 'draft' | 'freeagents'
   | 'raw' | 'smackdown' | 'stables' | 'trades' | 'league'
   | 'shows' | 'titles' | 'rankings' | 'progression' | 'images' | 'cards'
+  | 'rivalries'
 
 type Item = { key: Tab; label: string; icon: string; brand?: string; hint?: string }
 type Group = { title: string; items: Item[] }
@@ -48,6 +49,7 @@ export const GROUPS: Group[] = [
     { key: 'shows', label: 'Shows', icon: '▶', hint: 'Book a card, run the Rumble' },
     { key: 'titles', label: 'Titles', icon: '♛', hint: 'Championships and lineage' },
     { key: 'rankings', label: 'Rankings', icon: '↑', hint: 'The Power 25 and contenders' },
+    { key: 'rivalries', label: 'Rivalries', icon: '⚔', hint: "The save's feuds, ranked by more than meeting count" },
   ]},
   { title: 'Season', items: [
     { key: 'progression', label: 'Progression', icon: '↗', hint: 'Year-end rating changes to approve' },

@@ -196,6 +196,102 @@ def career(con: sqlite3.Connection, wid: int) -> dict:
     }
 
 
+# How a rivalry is ranked. Meetings alone puts two enhancement talents who
+# happened to be booked together nine times above a two-match blood feud that
+# headlined WrestleMania, so quality and stage count too. Deliberately not tuned
+# to be clever — it is a sort order, and the columns are all on screen so you can
+# disagree with it.
+RIVALRY_WEIGHTS = {
+    "meeting": 1.0,      # per match against each other
+    "quality": 0.06,     # per point of average match quality
+    "title": 2.0,        # per match with a belt on the line
+    "ppv": 1.0,          # per match on a pay-per-view
+    "close": 3.0,        # a rivalry nobody dominates is a better rivalry
+}
+
+
+def rivalries(con: sqlite3.Connection, limit: int = 40,
+              season: int | None = None) -> list[dict]:
+    """The save's real feuds, ranked — who has fought whom, and how good it was.
+
+    Built off the same participant rows a head-to-head uses, but aggregated the
+    other way round: instead of one wrestler against everyone, every PAIR at once.
+
+    The pair is normalised by id (`pa.wrestler_id < pb.wrestler_id`) so a rivalry
+    appears once rather than twice from each side. In a tag match that yields one
+    row per cross-team pairing, which is right — everyone on one side did face
+    everyone on the other.
+
+    `close` in the score is the part worth explaining: a rivalry where one
+    wrestler has won every match is a squash series, not a feud. Being evenly
+    matched is itself interesting, so it is rewarded rather than ignored.
+    """
+    where = ["pa.wrestler_id < pb.wrestler_id", "pa.team <> pb.team"]
+    args: list = []
+    if season is not None:
+        where.append("CAST(substr(s.held_on, 1, 4) AS INTEGER) = ?")
+        args.append(season)
+
+    rows = con.execute(
+        f"""SELECT pa.wrestler_id AS a_id, pb.wrestler_id AS b_id,
+                   COUNT(*) AS meetings,
+                   SUM(CASE WHEN m.finish <> 'draw' AND pa.is_winner THEN 1 ELSE 0 END) AS a_wins,
+                   SUM(CASE WHEN m.finish <> 'draw' AND pb.is_winner THEN 1 ELSE 0 END) AS b_wins,
+                   SUM(CASE WHEN m.finish = 'draw' THEN 1 ELSE 0 END) AS draws,
+                   AVG(m.quality) AS avg_quality,
+                   MAX(m.quality) AS best_quality,
+                   MIN(s.held_on) AS first_met,
+                   MAX(s.held_on) AS last_met,
+                   SUM(CASE WHEN m.title_id IS NOT NULL THEN 1 ELSE 0 END) AS title_matches,
+                   SUM(CASE WHEN s.is_ppv THEN 1 ELSE 0 END) AS ppv_matches
+              FROM sim_match m
+              JOIN sim_match_participant pa ON pa.match_id = m.id
+              JOIN sim_match_participant pb ON pb.match_id = m.id
+              JOIN show s ON s.id = m.show_id
+             WHERE {' AND '.join(where)}
+             GROUP BY a_id, b_id""", args).fetchall()
+
+    # Live feud heat, where the GM has started one. A booked rivalry that has not
+    # had many matches yet still belongs near the top of this list.
+    feud_heat: dict[tuple[int, int], int] = {}
+    for f in con.execute("SELECT a_id, b_id, heat, status FROM feud"):
+        key = (min(f["a_id"], f["b_id"]), max(f["a_id"], f["b_id"]))
+        feud_heat[key] = max(feud_heat.get(key, 0), f["heat"])
+
+    out = []
+    for r in rows:
+        avg_q = r["avg_quality"] or 0.0
+        total = (r["a_wins"] or 0) + (r["b_wins"] or 0)
+        # 1.0 when dead even, 0.0 when one side has won everything.
+        closeness = (1.0 - abs((r["a_wins"] or 0) - (r["b_wins"] or 0)) / total
+                     if total else 0.0)
+        w = RIVALRY_WEIGHTS
+        heat = feud_heat.get((r["a_id"], r["b_id"]), 0)
+        score = (r["meetings"] * w["meeting"]
+                 + avg_q * w["quality"]
+                 + (r["title_matches"] or 0) * w["title"]
+                 + (r["ppv_matches"] or 0) * w["ppv"]
+                 + closeness * w["close"]
+                 + heat * 0.05)
+        out.append({
+            "a": {"wrestler_id": r["a_id"], "name": _name(con, r["a_id"]),
+                  "wins": r["a_wins"] or 0},
+            "b": {"wrestler_id": r["b_id"], "name": _name(con, r["b_id"]),
+                  "wins": r["b_wins"] or 0},
+            "meetings": r["meetings"], "draws": r["draws"] or 0,
+            "avg_quality": round(avg_q, 1),
+            "best_quality": round(r["best_quality"], 1) if r["best_quality"] else None,
+            "first_met": r["first_met"], "last_met": r["last_met"],
+            "title_matches": r["title_matches"] or 0,
+            "ppv_matches": r["ppv_matches"] or 0,
+            "closeness": round(closeness, 2),
+            "active_heat": heat or None,
+            "score": round(score, 1),
+        })
+    out.sort(key=lambda x: -x["score"])
+    return out[:limit]
+
+
 def head_to_head(con: sqlite3.Connection, a: int, b: int) -> dict:
     """Every match these two have had against each other, in order.
 

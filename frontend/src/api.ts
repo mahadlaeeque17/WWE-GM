@@ -600,6 +600,49 @@ export const mintCards = (season?: number, overwrite = false) =>
   req<{ season: number; minted: number; skipped: number }>('/api/cards/mint',
     { method: 'POST', body: JSON.stringify({ season, overwrite }) })
 
+export interface RivalrySide { wrestler_id: number; name: string; wins: number }
+export interface Rivalry {
+  a: RivalrySide
+  b: RivalrySide
+  meetings: number
+  draws: number
+  avg_quality: number
+  best_quality: number | null
+  first_met: string
+  last_met: string
+  title_matches: number
+  ppv_matches: number
+  /** 1.0 when dead even, 0.0 when one side has won everything. */
+  closeness: number
+  active_heat: number | null
+  score: number
+}
+export const fetchRivalries = (limit = 40, season?: number) =>
+  req<Rivalry[]>(`/api/rivalries?limit=${limit}${season != null ? `&season=${season}` : ''}`)
+
+export interface TeamOfSeason {
+  season: number
+  wrestlers: PlayerCard[]
+  managers: PlayerCard[]
+  champions: string[]
+  note?: string
+}
+export const fetchTeamOfSeason = (season: number) =>
+  req<TeamOfSeason>(`/api/cards/team/${season}`)
+export const fetchBestEver = (limit = 40) =>
+  req<PlayerCard[]>(`/api/cards/best-ever?limit=${limit}`)
+
+export interface ProgressionPoint {
+  season_year: number
+  overall: number
+  tier: CardTier
+  special: string | null
+  record: string | null
+  stats: Partial<Record<StatKey, number>>
+}
+export const fetchProgression = (id: number) =>
+  req<ProgressionPoint[]>(`/api/wrestler/${id}/progression`)
+
 export interface SeasonLine {
   season: number; matches: number; wins: number; losses: number; draws: number
   ppv: number; titles_won: number; avg_quality: number | null; main_events: number
