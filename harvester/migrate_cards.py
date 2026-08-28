@@ -74,6 +74,57 @@ def _cols(con: sqlite3.Connection, table: str) -> set[str]:
     return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
 
 
+def ensure_schema(con: sqlite3.Connection) -> str | None:
+    """Add the manager columns and the card table to an already-open save.
+
+    THIS IS THE PATH A BOOTING SERVER TAKES, and it exists because the first
+    version did not have one. The deployed app runs on whatever database came
+    down from Blob storage, and this migration only ever ran as a script on a
+    laptop — so production got code that selected `a.mic` against a table with
+    no such column, and the roster endpoint returned 500 for every request. The
+    ratings migration had already taught this lesson once; the card migration
+    shipped without it anyway.
+
+    MUST RUN AFTER migrate_ratings.ensure_migrated(). That one REWRITES the
+    attributes table to drop the retired charisma column, and its replacement
+    DDL knows nothing about mic/influence — so adding these first would simply
+    lose them again on an old save.
+
+    Returns a one-line summary, or None if there was nothing to do.
+    """
+    done: list[str] = []
+    for table, ddl in (("attributes", "INTEGER NOT NULL DEFAULT 10"),
+                       ("attribute_override", "INTEGER")):
+        have = _cols(con, table)
+        if not have:
+            continue
+        for col in ("mic", "influence"):
+            if col not in have:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                done.append(f"{table}.{col}")
+
+    # Seed a manager's mic/influence from the value that already carried her
+    # promo ability. Only rows still on the default are touched, so this cannot
+    # flatten a hand edit on a later boot.
+    if done:
+        n = con.execute("""UPDATE attributes SET mic = popularity, influence = popularity
+                            WHERE mic = 10 AND influence = 10""").rowcount
+        if n:
+            done.append(f"seeded {n} from popularity")
+
+    had_cards = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rating_card'"
+    ).fetchone()
+    con.executescript(CARD_SCHEMA)
+    if not had_cards:
+        done.append("rating_card created")
+
+    if not done:
+        return None
+    con.commit()
+    return "card schema: " + ", ".join(done)
+
+
 def main(dbpath: Path) -> int:
     if not dbpath.exists():
         print(f"no database at {dbpath}")
@@ -82,34 +133,11 @@ def main(dbpath: Path) -> int:
     con.row_factory = sqlite3.Row
     done: list[str] = []
 
-    # ---------------------------------------------------- manager stat columns
-    for table, ddl in (("attributes", "INTEGER NOT NULL DEFAULT 10"),
-                       ("attribute_override", "INTEGER")):
-        have = _cols(con, table)
-        for col in ("mic", "influence"):
-            if have and col not in have:
-                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-                done.append(f"{table}.{col} added")
-
-    # Seed a manager's mic/influence from the value that already carried her
-    # promo ability. Popularity absorbed the old Charisma category, so it is the
-    # closest thing to a mic rating this save has ever held. Only rows still on
-    # the default are touched, so a re-run cannot flatten hand edits.
-    n = con.execute(
-        """UPDATE attributes SET mic = popularity, influence = popularity
-            WHERE mic = 10 AND influence = 10""").rowcount
-    if n:
-        done.append(f"seeded mic/influence from popularity for {n} wrestlers")
-
-    # ------------------------------------------------------------ card table
-    before = con.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='rating_card'"
-    ).fetchone()[0]
-    con.executescript(CARD_SCHEMA)
-    if not before:
-        done.append("rating_card created")
-
-    con.commit()
+    # Exactly what a booting server does — one implementation, so the CLI and
+    # production cannot drift apart.
+    summary = ensure_schema(con)
+    if summary:
+        done.append(summary)
     print("migrations applied:" if done else "nothing to migrate")
     for d in done:
         print(f"  {d}")

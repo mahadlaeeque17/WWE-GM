@@ -28,6 +28,7 @@ import game  # noqa: E402
 import history  # noqa: E402
 import images  # noqa: E402
 import negotiate  # noqa: E402
+import migrate_cards  # noqa: E402
 import migrate_ratings  # noqa: E402
 import rankings  # noqa: E402
 import rumble  # noqa: E402
@@ -181,10 +182,17 @@ def ensure_ready() -> None:
             # on `no such column: a.wrestling`. Guarded by a marker, so it is a
             # cheap no-op on every boot after the first.
             migrated = migrate_ratings.ensure_migrated(c)
+            # AFTER the ratings migration, never before: that one rewrites the
+            # attributes table and its DDL knows nothing about mic/influence, so
+            # adding them first would lose them again on an old save.
+            card_schema = migrate_cards.ensure_schema(c)
         finally:
             c.close()
-        if migrated:
-            _READY_LOG.append(migrated)
+        if card_schema:
+            _READY_LOG.append(card_schema)
+        if migrated or card_schema:
+            if migrated:
+                _READY_LOG.append(migrated)
             # Push the migrated save up NOW rather than waiting for the next
             # write. Otherwise the store keeps the old format and every cold
             # start pays for the migration again — and a container that dies

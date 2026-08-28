@@ -380,9 +380,21 @@ export default function App() {
               {isLoading && <p className="p-6 text-sm text-slate-500">Loading roster…</p>}
               {error && (
                 <div className="p-6">
-                  <p className="text-sm text-blood mb-1">Could not reach the API.</p>
+                  <p className="text-sm text-blood mb-1">The roster could not be loaded.</p>
+                  {/* The old copy said "it should be on localhost:8010" no matter
+                      where it was running, which is actively misleading on a
+                      deployed site — the API is same-origin there. Say where it
+                      actually looked, and what the two likely causes are. */}
                   <p className="text-xs text-slate-500">
-                    It should be on <code className="text-slate-300">http://localhost:8010</code>. {String(error)}
+                    Asked <code className="text-slate-300">{location.origin}/api/roster</code>
+                    {' '}and got: {String(error)}
+                  </p>
+                  <p className="text-xs text-slate-600 mt-2 max-w-[560px]">
+                    A 500 usually means the save on the server is older than the
+                    code — check <code className="text-slate-400">/api/store/status</code>,
+                    whose <code className="text-slate-400">startup</code> list says what
+                    the last boot migrated. Running locally, the API should be on
+                    port 8010.
                   </p>
                 </div>
               )}

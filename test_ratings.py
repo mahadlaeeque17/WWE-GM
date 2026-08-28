@@ -42,6 +42,7 @@ sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "harvester")]
 
 import attributes as A  # noqa: E402
 import game  # noqa: E402
+import migrate_cards  # noqa: E402
 import migrate_ratings  # noqa: E402
 import rankings  # noqa: E402
 
@@ -261,6 +262,36 @@ def main() -> int:
     check("the roster survived intact",
           oc.execute("SELECT COUNT(*) FROM attributes").fetchone()[0]
           == oc.execute("SELECT COUNT(*) FROM wrestler").fetchone()[0])
+
+    # The CARD schema has to self-heal on the same boot, and for the same reason.
+    # It shipped without this and took production down: the deployed app selected
+    # `a.mic` against a table that had no such column, so /api/roster returned 500
+    # for every request until the columns existed.
+    oc.executescript("""
+        CREATE TABLE attributes_nomic AS
+          SELECT wrestler_id, wrestling, popularity, looks, personal, availability,
+                 role, role_source, alignment, personality, formula_ver FROM attributes;
+        DROP TABLE attributes;
+        ALTER TABLE attributes_nomic RENAME TO attributes;
+        DROP TABLE IF EXISTS rating_card;
+    """)
+    oc.commit()
+    pre = {r[1] for r in oc.execute("PRAGMA table_info(attributes)")}
+    check("the fixture really lacks the manager columns", "mic" not in pre)
+
+    note = migrate_cards.ensure_schema(oc)
+    post = {r[1] for r in oc.execute("PRAGMA table_info(attributes)")}
+    check("boot adds mic and influence", {"mic", "influence"} <= post,
+          str(sorted(post)))
+    check("boot creates the card table",
+          bool(oc.execute("SELECT 1 FROM sqlite_master WHERE name='rating_card'").fetchone()))
+    check("boot says what it did", bool(note), repr(note))
+    check("a manager's mic is seeded, not left on the default",
+          oc.execute("""SELECT COUNT(*) FROM attributes a
+                          LEFT JOIN attribute_override o ON o.wrestler_id=a.wrestler_id
+                         WHERE COALESCE(o.role, a.role)='manager' AND a.mic <> 10"""
+                     ).fetchone()[0] > 0)
+    check("a second boot adds nothing", migrate_cards.ensure_schema(oc) is None)
 
     # Second boot must be free. A migration that re-ran would rescale a rescale.
     again = migrate_ratings.ensure_migrated(oc)
