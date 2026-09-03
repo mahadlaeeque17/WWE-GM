@@ -646,6 +646,20 @@ def run_show(
                     nm = con.execute("SELECT name FROM wrestler WHERE id=?", (mid,)).fetchone()
                     raise ValueError(f"{nm[0] if nm else mid} is not a signed manager")
 
+    # A woman switched to managing does not wrestle. The pre-booker already
+    # leaves her out, but that is only a suggestion — this is the rule, so a
+    # hand-booked card cannot put her in a match she is not eligible for.
+    for wid in booked:
+        cap = con.execute(
+            """SELECT COALESCE(o.role, a.role) cap, o.active_role
+                 FROM attributes a
+                 LEFT JOIN attribute_override o ON o.wrestler_id=a.wrestler_id
+                WHERE a.wrestler_id=?""", (wid,)).fetchone()
+        if cap and game.working_role(cap["cap"], cap["active_role"]) == "manager":
+            raise ValueError(
+                f"{game._wname(con, wid)} is working as a manager — switch her back "
+                f"to wrestling before you book her in a match.")
+
     # Injury gates MATCHES only. A woman on the shelf can still come out and
     # talk, which is how a feud survives an injury instead of dying with it.
     # Granted REST gates matches the same way: time off you promised her is not

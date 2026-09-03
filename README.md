@@ -210,6 +210,35 @@ years old."*
 the rate of simply being left off the card, and she is unbookable while it lasts.
 Booking through time off you granted is refused.
 
+## Wrestler, manager, or both
+
+Some women can do either job. For anyone marked **Wrestler + Manager**, you pick
+which one she is *doing* from a dropdown on her panel, and she stays that until
+you switch her back.
+
+The switch is one decision with two halves, because either half alone would be a
+lie:
+
+- **Her ratings change system.** A manager is scored on **Mic** and **Influence**
+  where a wrestler gets **Wrestling** and **Popularity**. Switching her re-rates
+  her card, her radar, her overall and her contract value — and the sliders you
+  edit her with follow, so you are never editing a number nothing is showing you.
+- **Her eligibility changes.** Working as a manager she cannot be booked in a
+  match (the pre-booker leaves her out and the sim refuses a hand-booked one),
+  she becomes available for the Manager's Championship, and she moves from the
+  wrestler draft pool to the manager pool.
+
+This is deliberately separate from three things it could be confused with:
+
+| | |
+|---|---|
+| **capability** (`role`) | what she is *able* to do — wrestler, manager, or both. Overwriting this to say "she is managing" would destroy the fact that she can also wrestle, leaving no way back. |
+| **this season's draft** | a per-season pin that only scopes which draft pool she enters. Wiped every rollover. |
+| **contract role** | what she was actually *signed* as, which is the deal and does not change underneath her. |
+
+A wrestler who is not `both` cannot be switched — pinning a pure wrestler to
+"manager" would be a rating system she has no numbers for.
+
 ## The rating system
 
 Five categories, each out of 20, summing to a 0–100 overall.

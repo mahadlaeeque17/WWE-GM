@@ -91,6 +91,15 @@ def head(t: str) -> None:
     print(f"\n{t}\n" + "-" * len(t))
 
 
+def _refuses(fn) -> bool:
+    """True if the call raises SigningError — for asserting a guard exists."""
+    try:
+        fn()
+        return False
+    except game.SigningError:
+        return True
+
+
 def morale_of(wid: int) -> int:
     return con.execute("SELECT morale FROM wrestler_state WHERE wrestler_id=?",
                        (wid,)).fetchone()[0]
@@ -835,6 +844,179 @@ head("advancing a month drives it")
 adv = game.advance_month(con)
 check("advance_month reports the month-end work", "month_end" in adv, str(list(adv)))
 
+head("a both-eligible wrestler can be put in one job")
+# She is capable of both; the GM chooses which she is DOING, and that choice
+# changes the rating system she is judged by as well as what she is eligible
+# for. Two halves of one decision — if only the ratings changed, the switch
+# would be cosmetic; if only eligibility changed, her card would lie.
+# Must be somebody still under contract to RAW: the forced-move tests above
+# deliberately trade one wrestler away and walk another out, so `roster` as
+# captured at the top of the file is stale by now.
+still_here = [r["wrestler_id"] for r in con.execute(
+    """SELECT wrestler_id FROM contract WHERE brand_id='RAW'
+       AND terminated_on IS NULL AND role<>'manager'""")]
+BOTH = None
+for w in still_here:
+    if game.role_of(con, w) == "both":
+        BOTH = w
+        break
+if BOTH is None:
+    # No natural `both` on this brand — make one, since the mechanic is what is
+    # under test, not the roster data.
+    BOTH = still_here[0]
+    con.execute("INSERT INTO attribute_override (wrestler_id, role, updated_at) "
+                "VALUES (?,?,?) ON CONFLICT(wrestler_id) DO UPDATE SET "
+                "role=excluded.role", (BOTH, "both", game.now_iso()))
+    con.commit()
+check("we have a both-eligible wrestler", game.role_of(con, BOTH) == "both",
+      game.role_of(con, BOTH))
+
+check("the rule has one home", game.working_role("both", None) == "wrestler"
+      and game.working_role("both", "manager") == "manager"
+      and game.working_role("wrestler", "manager") == "wrestler"
+      and game.working_role("manager", None) == "manager",
+      "working_role disagrees with itself")
+# A capability she does not have cannot be forced on her by an active_role.
+check("capability beats the pin",
+      game.working_role("wrestler", "manager") == "wrestler")
+
+head("switching her changes the rating system")
+before = game.effective_attributes(con, BOTH)
+check("she starts as a wrestler", before["working_role"] == "wrestler",
+      before["working_role"])
+check("and is rated on Wrestling and Popularity",
+      before["performance_pair"] == ["wrestling", "popularity"],
+      str(before["performance_pair"]))
+game.set_active_role(con, BOTH, "manager")
+after = game.effective_attributes(con, BOTH)
+check("switched, she is working as a manager", after["working_role"] == "manager",
+      after["working_role"])
+check("and is now rated on Mic and Influence",
+      after["performance_pair"] == ["mic", "influence"],
+      str(after["performance_pair"]))
+# The overall ADDS the pair, so it only has to move when the two pairs sum
+# differently — comparing the tuples would fail on (19,15) vs (17,17), which is
+# the same overall arrived at honestly.
+mic_inf = after["mic"] + after["influence"]
+wrs_pop = before["wrestling"] + before["popularity"]
+if mic_inf != wrs_pop:
+    check("her overall was recomputed on the new pair",
+          after["overall"] != before["overall"],
+          f"{before['overall']} -> {after['overall']} (pairs sum {wrs_pop} vs {mic_inf})")
+else:
+    check("her overall is consistent with the new pair",
+          after["overall"] == before["overall"],
+          f"the pairs sum the same ({wrs_pop}) so the overall should not move")
+check("her contract value followed too",
+      after["value"] == __import__("attributes").contract_value(
+          after["mic"], after["achievements"], after["influence"],
+          after["looks"], after["personal"], after["age"]),
+      f"{after['value']}")
+
+head("the roster page and her own panel agree")
+# The roster builds its rows from a BULK query and her panel from
+# effective_attributes. Both funnel through with_derived, but they assemble its
+# INPUT separately — which is exactly how this codebase previously ended up with
+# a rating that read one way on the roster and another on the panel. The first
+# cut of this feature reintroduced it: the bulk query did not select the new
+# column, so a switched wrestler still showed as a wrestler on the roster.
+import main as _api                                          # noqa: PLC0415
+_rows = {r["id"]: r for r in _api.roster()}
+_panel = game.effective_attributes(con, BOTH)
+_row = _rows[BOTH]
+check("both paths report the same working role",
+      _row["working_role"] == _panel["working_role"],
+      f"roster {_row['working_role']} vs panel {_panel['working_role']}")
+check("both paths report the same performance pair",
+      list(_row["performance_pair"]) == list(_panel["performance_pair"]),
+      f"roster {_row['performance_pair']} vs panel {_panel['performance_pair']}")
+check("both paths report the same overall",
+      _row["overall"] == _panel["overall"],
+      f"roster {_row['overall']} vs panel {_panel['overall']}")
+check("and the roster surfaces the standing choice",
+      _row["active_role"] == "manager", str(_row["active_role"]))
+
+head("every screen that shows a rating keys off the same thing")
+# The panel's editable sliders and the Rate grid both pick their pair from the
+# row. Keying either on `role` (the CAPABILITY) rather than `working_role` gave a
+# switched wrestler sliders labelled Wrestling and Popularity while her card,
+# her radar and her overall all read Mic and Influence — editing numbers nothing
+# was showing her. Guard the source, since the check itself cannot run TSX.
+_ui = (open(ROOT / "frontend" / "src" / "WrestlerPanel.tsx", encoding="utf-8").read()
+       + open(ROOT / "frontend" / "src" / "RateTab.tsx", encoding="utf-8").read())
+check("no rating editor keys off the capability role",
+      "r.role === 'manager'" not in _ui and "row.role === 'manager'" not in _ui,
+      "a rating editor is keyed on `role` instead of `working_role`")
+check("the panel picks its pair from working_role",
+      "row.working_role === 'manager'" in _ui)
+check("and so does the Rate grid",
+      "r.working_role === 'manager'" in _ui)
+
+head("and it changes what she is eligible for")
+BRAND = game.active_contract(con, BOTH, 2000)["brand_id"]
+pool = {w["id"] for w in autobook._pool(con, BRAND)}
+check("the pre-booker leaves an acting manager out of the match pool",
+      BOTH not in pool)
+opponent = next(w for w in still_here if w != BOTH)
+try:
+    sim.run_show(con, BRAND, "should refuse",
+                 [{"match_type": "singles", "teams": [[BOTH], [opponent]]}])
+    check("the sim refuses to book her in a match", False, "it ran")
+except ValueError as e:
+    check("the sim refuses to book her in a match",
+          "manager" in str(e).lower(), str(e))
+    check("and the refusal says how to fix it", "switch her back" in str(e), str(e))
+
+head("switching her back restores everything")
+game.set_active_role(con, BOTH, "wrestler")
+back = game.effective_attributes(con, BOTH)
+check("she is a wrestler again", back["working_role"] == "wrestler")
+check("rated on Wrestling and Popularity again",
+      back["performance_pair"] == ["wrestling", "popularity"])
+check("with the same overall she started with", back["overall"] == before["overall"],
+      f"{before['overall']} -> {back['overall']}")
+pool2 = {w["id"] for w in autobook._pool(con, BRAND)}
+check("and bookable once more", BOTH in pool2,
+      f"not in {BRAND}'s pool after switching back")
+
+head("clearing the choice falls back to wrestling")
+game.set_active_role(con, BOTH, None)
+cleared = game.effective_attributes(con, BOTH)
+check("no choice means wrestler", cleared["working_role"] == "wrestler",
+      cleared["working_role"])
+check("active_role really is cleared", cleared["active_role"] is None,
+      str(cleared["active_role"]))
+
+head("a pure wrestler cannot be switched")
+PURE = next((w for w in still_here if game.role_of(con, w) == "wrestler"), None)
+if PURE:
+    try:
+        game.set_active_role(con, PURE, "manager")
+        check("switching a non-both wrestler is refused", False, "it was allowed")
+    except game.SigningError as e:
+        check("switching a non-both wrestler is refused", True)
+        check("and says why", "not both" in str(e), str(e))
+    check("she was not modified",
+          game.effective_attributes(con, PURE)["working_role"] == "wrestler")
+check("a nonsense role is refused",
+      _refuses(lambda: game.set_active_role(con, BOTH, "referee")))
+
+head("the draft pools respect it")
+# Unsign her so she is back in a pool, then check which pool she lands in.
+game.set_active_role(con, BOTH, "manager")
+con.execute("UPDATE contract SET terminated_on=? WHERE wrestler_id=? "
+            "AND terminated_on IS NULL",
+            (con.execute("SELECT * FROM game_state WHERE id=1").fetchone()["current_date"],
+             BOTH))
+con.commit()
+wrs_pool = game.undrafted(con, 2000, "wrestler")
+mgr_pool = game.undrafted(con, 2000, "manager")
+check("an acting manager is out of the wrestler draft", BOTH not in wrs_pool)
+check("but in the manager draft", BOTH in mgr_pool)
+game.set_active_role(con, BOTH, "wrestler")
+check("switched back, she is in the wrestler draft",
+      BOTH in game.undrafted(con, 2000, "wrestler"))
+
 head("an old save upgrades itself at boot")
 # THE ONE THAT ONLY BITES IN PRODUCTION. The bundled seed ships without any of
 # these tables, and a stateless host pulls its save down from Blob storage — so
@@ -864,6 +1046,8 @@ check("boot adds tv_rating and buyrate", {"tv_rating", "buyrate"} <= scols,
 fcols = {r[1] for r in oc.execute("PRAGMA table_info(feud)")}
 check("boot adds the storyline columns",
       {"stage", "planned_blowoff", "blowoff_label"} <= fcols, str(sorted(fcols)))
+ocols = {r[1] for r in oc.execute("PRAGMA table_info(attribute_override)")}
+check("boot adds active_role", "active_role" in ocols, str(sorted(ocols)))
 wcols = {r[1] for r in oc.execute("PRAGMA table_info(wrestler_state)")}
 check("boot adds rest and injury detail",
       {"rested_until", "injury_severity", "injury_note"} <= wcols, str(sorted(wcols)))

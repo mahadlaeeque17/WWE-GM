@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Gallery from './Gallery'
 import {
-  saveOverride, clearOverride, releaseContract,
+  saveOverride, clearOverride, releaseContract, setActiveRole,
   removeWrestler, aiPromo, imageUrl, renameWrestler, aiScouting,
   setTags, clearHoldout, PERSONALITIES, fetchPersonalities, addAccolade, removeAccolade,
   fetchAccoladeKinds, saveBio, ageLabel, money, moneyFull, prettyDate, CAT_MAX, OVERALL_MAX, ROLE_LABEL,
@@ -51,7 +51,12 @@ export default function WrestlerPanel({
   row, brands, onClose,
 }: { row: RosterRow; brands: BrandFinance[]; onClose: () => void }) {
   const qc = useQueryClient()
-  const EDIT_CATEGORIES = row.role === 'manager'
+  // Keyed on the job she is DOING, not the jobs she is capable of. Using
+  // `row.role` here meant a both-eligible wrestler switched to managing got
+  // sliders labelled Wrestling and Popularity while her card, her radar and her
+  // overall all read Mic and Influence — editing numbers nothing was showing
+  // her, which is precisely what the MANAGER_CATEGORIES note above warns about.
+  const EDIT_CATEGORIES = row.working_role === 'manager'
     ? MANAGER_CATEGORIES : WRESTLER_CATEGORIES
   // Wrestling seeds from wrestling_base, NOT from the shown wrestling: opening
   // the panel and pressing save must not bake her current hot streak into the
@@ -119,6 +124,14 @@ export default function WrestlerPanel({
   const reset = useMutation({
     mutationFn: () => clearOverride(row.id),
     onSuccess: invalidate,
+    onError: (e: Error) => setErr(e.message),
+  })
+
+  // Switching her job re-rates her, so every screen that prints a rating has
+  // to be refetched — not just this panel.
+  const activeRole = useMutation({
+    mutationFn: (r: 'wrestler' | 'manager' | null) => setActiveRole(row.id, r),
+    onSuccess: () => { setErr(null); invalidate() },
     onError: (e: Error) => setErr(e.message),
   })
 
@@ -283,7 +296,13 @@ export default function WrestlerPanel({
           <p className="label text-[10px] text-slate-400 mt-1.5 flex items-center gap-1.5 flex-wrap">
             <AlignChip alignment={row.alignment} />
             {row.hall_of_fame && <span className="text-gold">★ HOF</span>}
+            {/* For a both-eligible wrestler, what she can do and what she is
+                doing are different facts and the header shows both — the second
+                is the one that decides her ratings. */}
             <span>{ROLE_LABEL[row.role]}
+            {row.role === 'both' && (
+              <span className="text-gold"> · working as {row.working_role}</span>
+            )}
             {row.style ? ` · ${row.style}` : ''}
             {row.age !== null && ` · age ${ageLabel(row.age, row.age_precision)}`}</span>
           </p>
@@ -386,6 +405,31 @@ export default function WrestlerPanel({
               ))}
             </select>
           </div>
+
+          {/* WHICH JOB SHE IS DOING — only meaningful for BOTH.
+              This is the switch that re-rates her: a manager is scored on Mic
+              and Influence where a wrestler gets Wrestling and Popularity, so
+              flipping it changes her card, her overall, her contract value and
+              what she can be booked in. */}
+          {row.role === 'both' && (
+            <div className="border-t border-edge-soft pt-2">
+              <div className="flex items-center justify-between">
+                <span className="label text-[10px] text-slate-500">Working as</span>
+                <select value={row.active_role ?? 'wrestler'}
+                  onChange={(e) => activeRole.mutate(e.target.value as 'wrestler' | 'manager')}
+                  disabled={activeRole.isPending}
+                  className="bg-canvas border border-gold/40 rounded px-2 py-1 text-xs">
+                  <option value="wrestler">Wrestler</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                {row.working_role === 'manager'
+                  ? 'Rated on Mic and Influence. She cannot be booked in a match, and she is available as a manager, until you switch her back.'
+                  : 'Rated on Wrestling and Popularity. Switch her to Manager to re-rate her on Mic and Influence — she then only manages.'}
+              </p>
+            </div>
+          )}
 
           {/* season role choice — only for BOTH */}
           {row.role === 'both' && (

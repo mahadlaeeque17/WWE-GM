@@ -338,7 +338,7 @@ def roster(include_removed: bool = False) -> list[dict]:
                    o.looks AS o_looks, o.personal AS o_personal,
                    o.mic AS o_mic, o.influence AS o_influence,
                    o.age_at_reset AS o_age, o.display_name, o.notes,
-                   o.role AS o_role, a.role AS d_role,
+                   o.role AS o_role, a.role AS d_role, o.active_role,
                    o.alignment AS o_alignment, o.personality AS o_personality,
                    o.draft_class AS o_draft_class,
                    COALESCE(s.sim_matches,0) sim_matches,
@@ -448,8 +448,13 @@ def roster(include_removed: bool = False) -> list[dict]:
                               else r["d_influence"]),
                 "sim_matches": r["sim_matches"], "sim_wins": r["sim_wins"],
                 "age": age,
-                # The role decides which two stats the overall is built from.
+                # The role decides which two stats the overall is built from —
+                # the CAPABILITY, plus the GM's standing choice of which job she
+                # is doing. Both are needed: with_derived resolves them through
+                # game.working_role so this page and her own panel can never
+                # print a different pair for the same wrestler.
                 "role": r["o_role"] or r["d_role"] or "wrestler",
+                "active_role": r["active_role"],
             }, ach_inputs.get(r["id"]))
 
             out.append({
@@ -476,6 +481,11 @@ def roster(include_removed: bool = False) -> list[dict]:
                 # Which two the overall was built from — so the card and the
                 # radar can label themselves without re-deriving the role rule.
                 "performance_pair": eff["performance_pair"],
+                # `role` is what she CAN do; `working_role` is what she is doing
+                # now. The UI needs both: one decides whether a switch is even
+                # offered, the other decides which two stats to print.
+                "active_role": eff.get("active_role"),
+                "working_role": eff["working_role"],
                 "overall": eff["overall"], "value": eff["value"],
                 "age_multiplier": round(A.age_multiplier(age), 3),
                 "edited": {
@@ -700,6 +710,27 @@ class TagsBody(BaseModel):
     personality: str | None = None
     draft_class: int | None = None
     season_role: str | None = "__keep__"   # wrestler | manager | null(clear); "__keep__" leaves it
+
+
+class ActiveRoleBody(BaseModel):
+    # None clears the choice; she falls back to wrestling.
+    active_role: str | None = None
+
+
+@app.post("/api/wrestler/{wid}/active-role")
+def set_active_role(wid: int, body: ActiveRoleBody) -> dict:
+    """Put a both-eligible wrestler in one job until switched.
+
+    Changes which two stats she is rated on AND what she is eligible for, so it
+    is one decision rather than two that could drift apart.
+    """
+    c = conn()
+    try:
+        return game.set_active_role(c, wid, body.active_role)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
 
 
 @app.post("/api/wrestler/{wid}/tags")
@@ -1185,7 +1216,7 @@ def bookable(brand_id: str, both_brands: bool = False) -> dict:
             f"""SELECT w.id, COALESCE(o.display_name, w.name) name, w.style,
                       c.brand_id, c.role,
                       COALESCE(s.momentum,50) momentum, COALESCE(s.morale,50) morale,
-                      COALESCE(s.fatigue,0) fatigue, s.injured_until
+                      COALESCE(s.fatigue,0) fatigue, s.injured_until, s.rested_until
                FROM contract c
                JOIN wrestler w ON w.id=c.wrestler_id
                LEFT JOIN attribute_override o ON o.wrestler_id=w.id
@@ -1194,6 +1225,10 @@ def bookable(brand_id: str, both_brands: bool = False) -> dict:
                  AND c.start_year<=? AND c.end_year>=?
                ORDER BY name""", (*brand_ids, season, season)).fetchall()
         wrestlers = []
+        # Anyone currently WORKING as a manager, whatever her contract says. She
+        # is listed as a manager below instead of here — switching her has to
+        # change what she is eligible for, or the choice is cosmetic.
+        acting_managers = []
         ach = game.achievement_inputs(c)
         for r in rows:
             d = dict(r)
@@ -1201,9 +1236,15 @@ def bookable(brand_id: str, both_brands: bool = False) -> dict:
             d["overall"] = eff["overall"]
             d["popularity"] = eff["popularity"]
             d["alignment"] = eff.get("alignment") or "face"
+            d["working_role"] = eff["working_role"]
             # Stamina is the readable side of fatigue: 100 is fresh, 0 is spent.
             d["stamina"] = max(0, 100 - (r["fatigue"] or 0))
             d["healthy"] = not (r["injured_until"] and r["injured_until"] > today)
+            d["resting"] = bool(r["rested_until"] and r["rested_until"] > today)
+            if eff["working_role"] == "manager":
+                acting_managers.append({"id": r["id"], "name": r["name"],
+                                        "brand_id": r["brand_id"]})
+                continue
             wrestlers.append(d)
         titles = [dict(t) for t in c.execute(
             f"""SELECT id, name, short_name, tier, prestige, team_size, brand_id
@@ -1212,6 +1253,9 @@ def bookable(brand_id: str, both_brands: bool = False) -> dict:
                 ORDER BY prestige DESC""", tuple(brand_ids))]
         # Managers signed to this brand — needed to book a Manager's Championship
         # match, where each wrestler fights on behalf of a manager.
+        # Signed AS a manager, plus anyone the GM has switched to managing.
+        # De-duplicated because a woman signed as a manager who is also pinned to
+        # managing would otherwise appear twice in the same dropdown.
         managers = [dict(r) for r in c.execute(
             f"""SELECT w.id, COALESCE(o.display_name, w.name) name, c.brand_id
                FROM contract c
@@ -1220,6 +1264,9 @@ def bookable(brand_id: str, both_brands: bool = False) -> dict:
                WHERE c.brand_id IN ({marks}) AND c.terminated_on IS NULL
                  AND c.role='manager' AND c.start_year<=? AND c.end_year>=?
                ORDER BY name""", (*brand_ids, season, season))]
+        seen_mgr = {m["id"] for m in managers}
+        managers += [m for m in acting_managers if m["id"] not in seen_mgr]
+        managers.sort(key=lambda m: m["name"])
         ids = {w["id"] for w in wrestlers}
         feuds = [f for f in game.list_feuds(c, "active")
                  if f["a_id"] in ids or f["b_id"] in ids]

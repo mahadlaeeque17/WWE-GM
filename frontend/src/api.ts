@@ -102,6 +102,17 @@ export interface RosterRow {
   influence: number
   /** The two stats her overall was actually built from, in card order. */
   performance_pair: [EditableStat, EditableStat]
+  /**
+   * `role` is what she CAN do; `working_role` is the job she is doing NOW.
+   *
+   * They differ only for a `both` wrestler the GM has switched. `active_role`
+   * is that standing choice (null = never switched, so she wrestles), and it is
+   * what the switcher writes. Everything that PRINTS a rating reads
+   * `working_role` / `performance_pair` instead, so the two stats on screen are
+   * always the two she is actually judged on.
+   */
+  active_role: 'wrestler' | 'manager' | null
+  working_role: 'wrestler' | 'manager'
   overall: number
   value: number
   age_multiplier: number
@@ -460,6 +471,17 @@ export const fetchBrandCash = () => req<any[]>('/api/brands/cash')
 export const ROLE_LABEL: Record<string, string> = {
   wrestler: 'Wrestler', manager: 'Manager', both: 'Wrestler + Manager',
 }
+
+/**
+ * Put a both-eligible wrestler in one job until switched back.
+ *
+ * Changes which two stats she is rated on AND what she is eligible for — one
+ * decision rather than two that could drift apart. `null` clears the choice.
+ */
+export const setActiveRole = (wrestler_id: number, active_role: 'wrestler' | 'manager' | null) =>
+  req<{ wrestler_id: number; active_role: string | null; working_role: string }>(
+    `/api/wrestler/${wrestler_id}/active-role`,
+    { method: 'POST', body: JSON.stringify({ active_role }) })
 
 export const releaseContract = (wrestler_id: number) =>
   req<any>('/api/contracts/release', { method: 'POST', body: JSON.stringify({ wrestler_id }) })

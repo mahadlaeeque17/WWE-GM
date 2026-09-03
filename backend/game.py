@@ -256,6 +256,17 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE feud ADD COLUMN planned_blowoff TEXT")
     if "blowoff_label" not in fcols:
         con.execute("ALTER TABLE feud ADD COLUMN blowoff_label TEXT")
+    # WHICH JOB SHE IS DOING RIGHT NOW, for somebody capable of both.
+    #
+    # Deliberately NOT `attribute_override.role`, which is her CAPABILITY — what
+    # she is able to do. Overwriting that to say "she is managing this year"
+    # would destroy the fact that she can also wrestle, and there would be no
+    # way to switch her back. And deliberately not `season_role` either: that is
+    # a draft-pool pin wiped at every season rollover, whereas this is a standing
+    # decision that holds until the GM changes it.
+    ocols = _cols("attribute_override")
+    if "active_role" not in ocols:
+        con.execute("ALTER TABLE attribute_override ADD COLUMN active_role TEXT")
     wcols = _cols("wrestler_state")
     # GM-granted time off. She is unbookable until this date and recovers fast —
     # the difference between "worn down" and "resting" being a decision you made.
@@ -385,6 +396,59 @@ def achievement_reasons(inputs: dict | None) -> list[str]:
     return A.achievement_breakdown(i["reigns"], i["title_days"], i["accolades"])
 
 
+# ---------------------------------------------------------------- working role
+
+def working_role(capability: str | None, active_role: str | None) -> str:
+    """The job she is ACTUALLY doing, from what she can do and what you chose.
+
+    Three values go in and one comes out, and keeping the rule here means the
+    ratings system, the draft pools, the booking screen and the sim can never
+    disagree about which she is:
+
+      capability   'wrestler' | 'manager' | 'both' — what she is able to do.
+      active_role  the GM's standing choice, only meaningful for 'both'.
+
+    A `both` wrestler with no choice made defaults to WRESTLER, which is what
+    the game did before this existed — so no save changes behaviour until the GM
+    actually picks something.
+    """
+    cap = capability or "wrestler"
+    if cap != "both":
+        return cap
+    return active_role if active_role in ("wrestler", "manager") else "wrestler"
+
+
+def set_active_role(con: sqlite3.Connection, wrestler_id: int,
+                    role: str | None) -> dict:
+    """Put a both-eligible wrestler in one job until you say otherwise.
+
+    Refuses on anyone who is not `both`: pinning a pure wrestler to "manager"
+    would be a rating system she has no numbers for. Passing None clears the
+    choice and she falls back to wrestling.
+    """
+    cap = role_of(con, wrestler_id)
+    if cap != "both" and role is not None:
+        raise SigningError(
+            f"she is a {cap}, not both — there is nothing to switch between.")
+    if role not in (None, "wrestler", "manager"):
+        raise SigningError("a role is 'wrestler', 'manager', or nothing")
+    con.execute(
+        """INSERT INTO attribute_override (wrestler_id, active_role, updated_at)
+           VALUES (?,?,?) ON CONFLICT(wrestler_id) DO UPDATE SET
+             active_role=excluded.active_role, updated_at=excluded.updated_at""",
+        (wrestler_id, role, now_iso()))
+    # Her card is scored on a different pair now, so the two stats she is judged
+    # on have changed. Say so — a silent overall change looks like a bug.
+    now = working_role(cap, role)
+    a, b = A.performance_pair(now)
+    log_event(con, "role",
+              f"{_wname(con, wrestler_id)} is working as a {now} — "
+              f"rated on {A.STAT_LABELS[a]} and {A.STAT_LABELS[b]} from now on.",
+              icon="🔀")
+    con.commit()
+    return {"wrestler_id": wrestler_id, "active_role": role, "working_role": now}
+
+
 def effective_attributes(con: sqlite3.Connection, wrestler_id: int,
                          ach_inputs: dict | None = None) -> dict:
     """The five ratings for one wrestler. Override wins, derived is the fallback.
@@ -417,6 +481,9 @@ def effective_attributes(con: sqlite3.Connection, wrestler_id: int,
           COALESCE(o.alignment,  a.alignment)  AS alignment,
           COALESCE(o.personality, a.personality) AS personality,
           COALESCE(o.role,       a.role)       AS role,
+          -- The GM's standing choice for a `both` wrestler. NULL means she has
+          -- not been switched and works as a wrestler; see working_role().
+          o.active_role                        AS active_role,
           COALESCE(s.sim_matches, 0)           AS sim_matches,
           COALESCE(s.sim_wins, 0)              AS sim_wins
         FROM wrestler w
@@ -454,7 +521,12 @@ def with_derived(d: dict, ach_inputs: dict | None) -> dict:
     d["achievements"] = achievement_score(ach_inputs)
     d["achievement_reasons"] = achievement_reasons(ach_inputs)
 
-    a_key, b_key = A.performance_pair(d.get("role") or "wrestler")
+    # The pair she is JUDGED on follows the job she is doing, not the jobs she is
+    # capable of. This is what makes switching a `both` wrestler to manager
+    # re-rate her on Mic and Influence everywhere at once — the roster, her card,
+    # the pentagon, her contract value and the sim all read through here.
+    d["working_role"] = working_role(d.get("role"), d.get("active_role"))
+    a_key, b_key = A.performance_pair(d["working_role"])
     d["overall"] = A.overall(d[a_key], d["achievements"], d[b_key],
                              d["looks"], d["personal"])
     d["value"] = A.contract_value(d[a_key], d["achievements"], d[b_key],
@@ -1529,6 +1601,9 @@ def undrafted(con: sqlite3.Connection, season: int, kind: str = "wrestler") -> l
            WHERE COALESCE(o.role, a.role) IN ({','.join('?' * len(roles))})
              AND COALESCE(o.draft_class, ?) <= ?
              AND (sr.role IS NULL OR sr.role != 'manager')
+             -- Switched to managing: she is not in the wrestler pool at all
+             -- until she is switched back. Same rule as everywhere else.
+             AND COALESCE(o.active_role, 'wrestler') <> 'manager'
              AND NOT EXISTS (
              SELECT 1 FROM contract c
              WHERE c.wrestler_id = w.id AND c.terminated_on IS NULL

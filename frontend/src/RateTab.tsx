@@ -246,9 +246,12 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
             {rows.map((r, ri) => {
               // The overall as it WOULD be with the pending edits applied, so the
               // number moves as you type rather than after you save.
-              const isMgr = r.role === 'manager'
-              const perfA = keyFor(COLS[0], r.role)
-              const perfB = keyFor(COLS[1], r.role)
+              // The job she is DOING decides which two stats this row edits —
+              // see the note on EDIT_CATEGORIES in WrestlerPanel. Keying on
+              // `role` would show a switched wrestler the wrong pair.
+              const isMgr = r.working_role === 'manager'
+              const perfA = keyFor(COLS[0], r.working_role)
+              const perfB = keyFor(COLS[1], r.working_role)
               // The overall as it WOULD be with the pending edits applied. For a
               // wrestler the shown Wrestling includes her record swing, so the
               // base is swapped out for the swung value; a manager has no swing.
@@ -293,7 +296,7 @@ export default function RateTab({ roster }: { roster: RosterRow[] }) {
                     </span>
                   </td>
                   {COLS.map((c, ci) => {
-                    const ck = keyFor(c, r.role)
+                    const ck = keyFor(c, r.working_role)
                     const v = value(r, ck)
                     const dirty = edits[r.id]?.[ck] !== undefined
                     return (

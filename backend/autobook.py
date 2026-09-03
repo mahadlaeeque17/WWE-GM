@@ -87,16 +87,22 @@ def _pool(con: sqlite3.Connection, brand_id: str) -> list[dict]:
         """SELECT w.id, COALESCE(o.display_name, w.name) name, w.style,
                   COALESCE(s.momentum,50) momentum, COALESCE(s.morale,50) morale,
                   COALESCE(s.fatigue,0) fatigue, s.injured_until,
-                  s.rested_until, c.role
+                  s.rested_until, c.role,
+                  COALESCE(o.role, a.role) capability, o.active_role
              FROM contract c
              JOIN wrestler w ON w.id=c.wrestler_id
+             JOIN attributes a ON a.wrestler_id=w.id
              LEFT JOIN attribute_override o ON o.wrestler_id=w.id
              LEFT JOIN wrestler_state s ON s.wrestler_id=w.id
             WHERE c.brand_id=? AND c.terminated_on IS NULL
               AND c.start_year<=? AND c.end_year>=?""",
         (brand_id, season, season),
     ):
+        # Signed as a manager, or switched to managing — either way she is not
+        # in a match. `working_role` is the single rule (see game.working_role).
         if r["role"] == "manager":
+            continue
+        if game.working_role(r["capability"], r["active_role"]) == "manager":
             continue
         if r["injured_until"] and r["injured_until"] > today:
             continue
