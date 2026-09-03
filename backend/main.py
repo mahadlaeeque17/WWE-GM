@@ -22,14 +22,17 @@ sys.path.insert(0, str(ROOT / "harvester"))
 
 import ai  # noqa: E402
 import attributes as A  # noqa: E402
+import autobook  # noqa: E402
 import booking  # noqa: E402
 import cards  # noqa: E402
 import game  # noqa: E402
 import history  # noqa: E402
 import images  # noqa: E402
 import negotiate  # noqa: E402
+import matches as MT  # noqa: E402
 import migrate_cards  # noqa: E402
 import migrate_ratings  # noqa: E402
+import promos as PR  # noqa: E402
 import rankings  # noqa: E402
 import rumble  # noqa: E402
 import sim  # noqa: E402
@@ -1058,17 +1061,29 @@ class ShowBody(BaseModel):
     brand_id: str
     name: str
     card: list[dict] | None = None
+    promos: list[dict] | None = None
     matches: int = 4
     is_ppv: bool = False
     ppv_name: str | None = None
     logistics: dict | None = None
+    # Which show format an auto-booked card should be built to: tv | snme | ppv.
+    kind: str | None = None
 
 
 @app.post("/api/sim/show")
 def run_show(body: ShowBody) -> dict:
     c = conn()
     try:
-        card = body.card or sim.auto_card(c, body.brand_id, body.matches)
+        kind = body.kind or ("ppv" if body.is_ppv else "tv")
+        card = body.card
+        promo_card = body.promos
+        if card is None:
+            card = sim.auto_card(c, body.brand_id, body.matches, kind)
+            # An auto-booked show gets the format's promos too, so a quick sim
+            # produces the same shape of night as a hand-booked one.
+            if promo_card is None:
+                want = autobook.SHOW_FORMATS.get(kind, autobook.SHOW_FORMATS["tv"])["promos"]
+                promo_card = sim.auto_promos(c, body.brand_id, want, kind)
         # For a hand-booked card, enforce title eligibility (weight class, brand
         # exclusivity) before anything is simulated — the auto card already only
         # books eligible wrestlers, but a manual booker can put anyone anywhere.
@@ -1082,7 +1097,7 @@ def run_show(body: ShowBody) -> dict:
                                 raise HTTPException(400, why)
         return sim.run_show(c, body.brand_id, body.name, card,
                             is_ppv=body.is_ppv, ppv_name=body.ppv_name,
-                            logistics=body.logistics)
+                            logistics=body.logistics, promo_card=promo_card or [])
     except ValueError as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1091,7 +1106,30 @@ def run_show(body: ShowBody) -> dict:
 
 @app.get("/api/booking/catalogue")
 def booking_catalogue() -> dict:
-    return booking.catalogue()
+    """Everything the booking screen needs to render a card: the stipulations
+    and production tiers, the match STRUCTURES, the promo types, and the show
+    formats (how many matches and promos a night is supposed to have)."""
+    return {**booking.catalogue(),
+            "match_types": MT.catalogue(),
+            "promo_types": PR.catalogue(),
+            "formats": [{"key": k, **v} for k, v in autobook.SHOW_FORMATS.items()]}
+
+
+@app.get("/api/booking/suggest")
+def booking_suggest(brand_id: str, kind: str = "tv") -> dict:
+    """The PRE-BOOKED card the GM starts from.
+
+    Rivalries first, belts on the biggest match, face-vs-heel, stamina
+    respected, shapes mixed. Writes nothing — the GM edits whatever she likes
+    and POSTs it back to /api/sim/show.
+    """
+    c = conn()
+    try:
+        return autobook.suggest(c, brand_id, kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
 
 
 class PreviewBody(BaseModel):
@@ -1110,53 +1148,81 @@ def booking_preview(body: PreviewBody) -> dict:
 
 
 @app.get("/api/sim/bookable")
-def bookable(brand_id: str) -> dict:
+def bookable(brand_id: str, both_brands: bool = False) -> dict:
     """Who a brand can put on a card right now, and which belts can be defended.
 
-    Healthy wrestlers under a live contract for this brand — the manual card
-    builder's roster. Shared belts (brand_id NULL) plus this brand's own are
-    listed as bookable titles.
+    Wrestlers under a live contract for this brand — the manual card builder's
+    roster, with each one's stamina, momentum, alignment and current feuds so the
+    GM can see WHY the pre-booked card looks the way it does. Shared belts
+    (brand_id NULL) plus this brand's own are listed as bookable titles.
+
+    `both_brands` widens it to the whole league, which is what a pay-per-view
+    needs: a co-branded card draws three matches from each side.
     """
     c = conn()
     try:
         st = current_state(c)
         if not st:
-            return {"wrestlers": [], "titles": [], "managers": []}
+            return {"wrestlers": [], "titles": [], "managers": [], "feuds": [],
+                    "tag_teams": [], "factions": []}
         game.ensure_titles(c)
         season, today = st["season_year"], st["current_date"]
+        brand_ids = [b[0] for b in game.BRANDS] if both_brands else [brand_id]
+        marks = ",".join("?" * len(brand_ids))
         rows = c.execute(
-            """SELECT w.id, COALESCE(o.display_name, w.name) name, w.style,
+            f"""SELECT w.id, COALESCE(o.display_name, w.name) name, w.style,
+                      c.brand_id, c.role,
                       COALESCE(s.momentum,50) momentum, COALESCE(s.morale,50) morale,
                       COALESCE(s.fatigue,0) fatigue, s.injured_until
                FROM contract c
                JOIN wrestler w ON w.id=c.wrestler_id
                LEFT JOIN attribute_override o ON o.wrestler_id=w.id
                LEFT JOIN wrestler_state s ON s.wrestler_id=w.id
-               WHERE c.brand_id=? AND c.terminated_on IS NULL
+               WHERE c.brand_id IN ({marks}) AND c.terminated_on IS NULL
                  AND c.start_year<=? AND c.end_year>=?
-               ORDER BY name""", (brand_id, season, season)).fetchall()
+               ORDER BY name""", (*brand_ids, season, season)).fetchall()
         wrestlers = []
         ach = game.achievement_inputs(c)
         for r in rows:
             d = dict(r)
-            d["overall"] = game.effective_attributes(c, r["id"], ach.get(r["id"]))["overall"]
+            eff = game.effective_attributes(c, r["id"], ach.get(r["id"]))
+            d["overall"] = eff["overall"]
+            d["popularity"] = eff["popularity"]
+            d["alignment"] = eff.get("alignment") or "face"
+            # Stamina is the readable side of fatigue: 100 is fresh, 0 is spent.
+            d["stamina"] = max(0, 100 - (r["fatigue"] or 0))
             d["healthy"] = not (r["injured_until"] and r["injured_until"] > today)
             wrestlers.append(d)
         titles = [dict(t) for t in c.execute(
-            "SELECT id, name, short_name, tier, prestige, team_size, brand_id "
-            "FROM game_title WHERE active=1 AND (brand_id=? OR brand_id IS NULL) "
-            "ORDER BY prestige DESC", (brand_id,))]
+            f"""SELECT id, name, short_name, tier, prestige, team_size, brand_id
+                FROM game_title WHERE active=1
+                  AND (brand_id IN ({marks}) OR brand_id IS NULL)
+                ORDER BY prestige DESC""", tuple(brand_ids))]
         # Managers signed to this brand — needed to book a Manager's Championship
         # match, where each wrestler fights on behalf of a manager.
         managers = [dict(r) for r in c.execute(
-            """SELECT w.id, COALESCE(o.display_name, w.name) name
+            f"""SELECT w.id, COALESCE(o.display_name, w.name) name, c.brand_id
                FROM contract c
                JOIN wrestler w ON w.id=c.wrestler_id
                LEFT JOIN attribute_override o ON o.wrestler_id=w.id
-               WHERE c.brand_id=? AND c.terminated_on IS NULL AND c.role='manager'
-                 AND c.start_year<=? AND c.end_year>=?
-               ORDER BY name""", (brand_id, season, season))]
-        return {"wrestlers": wrestlers, "titles": titles, "managers": managers}
+               WHERE c.brand_id IN ({marks}) AND c.terminated_on IS NULL
+                 AND c.role='manager' AND c.start_year<=? AND c.end_year>=?
+               ORDER BY name""", (*brand_ids, season, season))]
+        ids = {w["id"] for w in wrestlers}
+        feuds = [f for f in game.list_feuds(c, "active")
+                 if f["a_id"] in ids or f["b_id"] in ids]
+        stables = game.list_stables(c)
+        return {"wrestlers": wrestlers, "titles": titles, "managers": managers,
+                "feuds": feuds,
+                "tag_teams": [{"id": t["id"], "name": t["name"],
+                               "members": [m["wrestler_id"] for m in t["members"]]}
+                              for t in stables["tag_teams"]
+                              if all(m["wrestler_id"] in ids for m in t["members"])
+                              and len(t["members"]) >= 2],
+                "factions": [{"id": f["id"], "name": f["name"],
+                              "members": [m["wrestler_id"] for m in f["members"]
+                                          if m["wrestler_id"] in ids]}
+                             for f in stables["factions"]]}
     finally:
         c.close()
 
@@ -1248,7 +1314,13 @@ def ai_rival_book(body: RivalBookBody) -> dict:
         booked = ai.rival_booking(c, body.brand_id, body.matches)
         if body.run:
             name = body.name or f"{body.brand_id} (AI-booked)"
-            show = sim.run_show(c, body.brand_id, name, booked["card"])
+            # The rival GM books MATCHUPS only. Left there an AI-booked night
+            # would be four matches and no talking, which is not the format the
+            # rest of the game runs — so the promo half comes from the same
+            # pre-booker the card screen uses.
+            want = autobook.SHOW_FORMATS["tv"]["promos"]
+            show = sim.run_show(c, body.brand_id, name, booked["card"],
+                                promo_card=sim.auto_promos(c, body.brand_id, want, "tv"))
             return {**booked, "show": show}
         return booked
     except ai.AIUnavailable as e:
@@ -1261,7 +1333,9 @@ def ai_rival_book(body: RivalBookBody) -> dict:
 
 @app.get("/api/shows")
 def shows() -> list[dict]:
-    return q("""SELECT s.*, (SELECT COUNT(*) FROM sim_match m WHERE m.show_id=s.id) matches
+    return q("""SELECT s.*,
+                       (SELECT COUNT(*) FROM sim_match m WHERE m.show_id=s.id) matches,
+                       (SELECT COUNT(*) FROM sim_promo p WHERE p.show_id=s.id) promos
                 FROM show s ORDER BY s.held_on DESC, s.id DESC""")
 
 
@@ -1281,7 +1355,20 @@ def show_detail(show_id: int) -> dict:
                JOIN wrestler w ON w.id=p.wrestler_id
                LEFT JOIN attribute_override o ON o.wrestler_id=p.wrestler_id
                WHERE p.match_id=? ORDER BY p.team""", (m["id"],))
-    return {**base[0], "matches": matches}
+        # Rows written before match types existed carry none — name the shape
+        # from the sides rather than showing a blank.
+        teams: dict[int, list] = {}
+        for p in m["participants"]:
+            teams.setdefault(p["team"], []).append(p["wrestler_id"])
+        key = m.get("match_type") or MT.infer([teams[k] for k in sorted(teams)])
+        m["match_type"] = key
+        m["match_type_label"] = MT.get(key)["label"]
+    c = conn()
+    try:
+        promo_list = PR.for_show(c, show_id)
+    finally:
+        c.close()
+    return {**base[0], "matches": matches, "promos": promo_list}
 
 
 @app.get("/api/titles")

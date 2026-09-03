@@ -152,7 +152,7 @@ export interface BrandFinance {
 
 export interface ShowSummary {
   id: number; brand_id: string; name: string; held_on: string
-  rating: number | null; attendance: number | null; matches: number
+  rating: number | null; attendance: number | null; matches: number; promos: number
   is_ppv: number; ppv_name: string | null
 }
 
@@ -164,7 +164,8 @@ export interface Calendar {
   month: number; month_name: string; ppv: string | null
   ppv_day?: number; days_in_month?: number; first_weekday?: number
   shows?: CalendarShow[]
-  snme?: { month: number; month_name: string; day: number }
+  /** The two Saturday Night's Main Event days in the current month. */
+  snme_days?: number[]
   is_finale?: boolean
   schedule: { month: number; month_name: string; name: string }[]
 }
@@ -454,36 +455,106 @@ export const releaseContract = (wrestler_id: number) =>
 export const tradeWrestlers = (side_a: number[], side_b: number[]) =>
   req<any>('/api/contracts/trade', { method: 'POST', body: JSON.stringify({ side_a, side_b }) })
 
-export const runShow = (brand_id: string, name: string, matches = 4, is_ppv = false, ppv_name?: string) =>
-  req<any>('/api/sim/show', { method: 'POST', body: JSON.stringify({ brand_id, name, matches, is_ppv, ppv_name: ppv_name ?? null }) })
+/** Auto-book and run in one call. `kind` picks the show format (tv | snme | ppv),
+ *  which decides how many matches and promos the card is built to. */
+export const runShow = (brand_id: string, name: string, matches = 4, is_ppv = false,
+                        ppv_name?: string, kind?: string) =>
+  req<any>('/api/sim/show', {
+    method: 'POST',
+    body: JSON.stringify({ brand_id, name, matches, is_ppv, ppv_name: ppv_name ?? null,
+                           kind: kind ?? (is_ppv ? 'ppv' : 'tv') }),
+  })
 
 // ---- manual booking ----
-export interface CardMatch { teams: number[][]; title_id: number | null; managers?: number[]; stipulation?: string }
+/**
+ * One row of a card. `match_type` is the STRUCTURE (singles, tag, triple
+ * threat, fatal 4-way...) and `stipulation` the RULES (steel cage, tables,
+ * no-DQ) — two independent axes that compose, so a Fatal 4-Way inside a cage
+ * needs no entry of its own.
+ */
+export interface CardMatch {
+  teams: number[][]; title_id: number | null; managers?: number[]
+  stipulation?: string; match_type?: string
+  /** Why the pre-booker put this match on the show. Not sent back. */
+  why?: string; slot?: number
+}
+/** One promo segment. `wrestler_ids[0]` is whoever has the mic. */
+export interface CardPromo {
+  kind: string; wrestler_ids: number[]; topic?: string | null
+  why?: string; slot?: number; label?: string
+}
 export interface Logistics { arena: string; production: string; effects: string; advertising: string }
-export const runCard = (brand_id: string, name: string, card: CardMatch[], is_ppv = false, ppv_name?: string, logistics?: Logistics) =>
-  req<any>('/api/sim/show', { method: 'POST', body: JSON.stringify({ brand_id, name, card, is_ppv, ppv_name: ppv_name ?? null, logistics: logistics ?? null }) })
+export const runCard = (
+  brand_id: string, name: string, card: CardMatch[], is_ppv = false, ppv_name?: string,
+  promos: CardPromo[] = [], logistics?: Logistics,
+) =>
+  req<any>('/api/sim/show', {
+    method: 'POST',
+    body: JSON.stringify({
+      brand_id, name, is_ppv, ppv_name: ppv_name ?? null,
+      card: card.map((m) => ({
+        teams: m.teams, title_id: m.title_id, stipulation: m.stipulation ?? 'normal',
+        match_type: m.match_type ?? 'singles', ...(m.managers ? { managers: m.managers } : {}),
+      })),
+      promos: promos.map((p) => ({ kind: p.kind, wrestler_ids: p.wrestler_ids, topic: p.topic ?? null })),
+      logistics: logistics ?? null,
+    }),
+  })
 
+export interface MatchType {
+  key: string; label: string; short: string; desc: string
+  min_sides: number; max_sides: number; min_per_side: number; max_per_side: number
+  quality: number; fatigue: number; uneven: boolean; wrestlers: number
+}
+export interface PromoType {
+  key: string; label: string; desc: string; min: number; max: number
+  heat: number; momentum: number; guest_mom: number; quality: number
+  fatigue: number; needs_feud: boolean
+}
+export interface ShowFormat {
+  key: string; label: string; desc: string
+  matches: number; promos: number; brands: number; per_brand?: number
+}
 export interface Tier { key: string; label: string; cost: number; capacity?: number; ticket?: number; att_mult?: number; quality?: number; fan_growth?: number; no_dq?: boolean }
-export interface BookingCatalogue { stipulations: Tier[]; arenas: Tier[]; production: Tier[]; effects: Tier[]; advertising: Tier[] }
+export interface BookingCatalogue {
+  stipulations: Tier[]; arenas: Tier[]; production: Tier[]; effects: Tier[]; advertising: Tier[]
+  match_types: MatchType[]; promo_types: PromoType[]; formats: ShowFormat[]
+}
 export const fetchBookingCatalogue = () => req<BookingCatalogue>('/api/booking/catalogue')
+
+/** The pre-booked card the GM starts from. Writes nothing. */
+export interface Suggestion {
+  format: string; format_label: string; brands: string[]
+  matches: CardMatch[]; promos: CardPromo[]; notes: string[]
+  wanted: { matches: number; promos: number }
+}
+export const fetchSuggestion = (brand_id: string, kind: string) =>
+  req<Suggestion>(`/api/booking/suggest?brand_id=${brand_id}&kind=${kind}`)
 export interface BookingPreview { fans: number; attendance: number; gate: number; cost: number; budget: number; stipend: number; proj_quality: number; affordable: boolean; capacity: number }
 export const bookingPreview = (brand_id: string, card: CardMatch[], logistics: Logistics) =>
   req<BookingPreview>('/api/booking/preview', { method: 'POST', body: JSON.stringify({ brand_id, card, logistics }) })
 
+export interface BookableWrestler {
+  id: number; name: string; style: string | null; overall: number
+  popularity: number; alignment: string; brand_id: string; role: string
+  momentum: number; morale: number; fatigue: number
+  /** 100 = fresh, 0 = spent. The readable side of fatigue. */
+  stamina: number
+  injured_until: string | null; healthy: boolean
+}
 export interface Bookable {
-  wrestlers: {
-    id: number; name: string; style: string | null; overall: number
-    momentum: number; morale: number; fatigue: number
-    injured_until: string | null; healthy: boolean
-  }[]
+  wrestlers: BookableWrestler[]
   titles: {
     id: number; name: string; short_name: string | null; tier: string
     prestige: number; team_size: number; brand_id: string | null
   }[]
-  managers: { id: number; name: string }[]
+  managers: { id: number; name: string; brand_id: string }[]
+  feuds: Feud[]
+  tag_teams: { id: number; name: string; members: number[] }[]
+  factions: { id: number; name: string; members: number[] }[]
 }
-export const fetchBookable = (brand_id: string) =>
-  req<Bookable>(`/api/sim/bookable?brand_id=${brand_id}`)
+export const fetchBookable = (brand_id: string, both_brands = false) =>
+  req<Bookable>(`/api/sim/bookable?brand_id=${brand_id}&both_brands=${both_brands}`)
 
 // ---- AI (Groq, phase 5) ----
 export interface AIStatus {

@@ -748,6 +748,31 @@ def contenders(con: sqlite3.Connection, week_of: str | None = None) -> list[dict
     return out
 
 
+def ladder_for(con: sqlite3.Connection, title_id: int) -> list[dict]:
+    """One belt's contender ladder, best claim first, with a hand-pinned #1
+    contender promoted to the front.
+
+    Split out for the auto-booker, which needs one title's ladder and would
+    otherwise rebuild every belt's to read it. A save with no published issue
+    yet returns [] — the caller falls back to star power.
+    """
+    ensure_schema(con)
+    issue = con.execute("SELECT id FROM power_issue ORDER BY week_of DESC LIMIT 1").fetchone()
+    rows: list[dict] = [] if not issue else [dict(r) for r in _rows(
+        con, """SELECT c.wrestler_id, c.rank_no, c.score, w.name FROM contender_entry c
+                JOIN wrestler w ON w.id=c.wrestler_id
+                WHERE c.issue_id=? AND c.title_id=? ORDER BY c.rank_no""",
+        (issue["id"], title_id))]
+    lock = con.execute("SELECT wrestler_id FROM contender_lock WHERE title_id=?",
+                       (title_id,)).fetchone()
+    if lock and lock["wrestler_id"]:
+        wid = lock["wrestler_id"]
+        rows = ([{"wrestler_id": wid, "rank_no": 0, "score": None,
+                  "name": _name(con, wid), "locked": True}]
+                + [r for r in rows if r["wrestler_id"] != wid])
+    return rows
+
+
 def lock_contender(con: sqlite3.Connection, title_id: int, wrestler_id: int | None) -> dict:
     """Pin (or unpin) a #1 contender by hand. A pin outranks the computed ladder
     from the next issue on; it does not rewrite issues already published."""
@@ -826,7 +851,8 @@ def season_performance(con: sqlite3.Connection, season: int) -> list[dict]:
 
     perf = {wid: {"wrestler_id": wid, "matches": 0, "wins": 0, "losses": 0, "draws": 0,
                   "quality_sum": 0.0, "main_events": 0, "ppv": 0, "titles_won": 0,
-                  "weeks_top10": 0, "weeks_top25": 0, "nominations": 0, "feud_heat": 0}
+                  "weeks_top10": 0, "weeks_top25": 0, "nominations": 0, "feud_heat": 0,
+                  "promos": 0, "avg_promo": None}
             for wid in signed}
 
     for r in _rows(con, """SELECT p.wrestler_id, p.is_winner, m.slot, m.show_id, m.quality,
@@ -869,6 +895,15 @@ def season_performance(con: sqlite3.Connection, season: int) -> list[dict]:
                            GROUP BY wrestler_id""", (season,)):
         if r["wrestler_id"] in perf:
             perf[r["wrestler_id"]]["nominations"] = r["n"]
+
+    # Promo work counts. A woman who carried the talking half of the show all
+    # year has built her own popularity, and progression should say so even if
+    # she never headlined a match.
+    import promos as _PR                                     # noqa: PLC0415
+    for wid, pc in _PR.season_counts(con, season).items():
+        if wid in perf:
+            perf[wid]["promos"] = pc["promos"]
+            perf[wid]["avg_promo"] = pc["avg_promo"]
 
     for r in _rows(con, "SELECT a_id, b_id, heat FROM feud"):
         for wid in (r["a_id"], r["b_id"]):
@@ -921,6 +956,12 @@ def _season_score(st: dict, ctx: dict) -> float:
         s += 4.0 * min(1.0, st["weeks_top25"] / ctx["issues"])
     s += min(12.0, 6.0 * st["titles_won"])
     s += min(8.0, 4.0 * st["nominations"])
+    # Promo work: volume up to a cap, plus a bonus for actually being good at it.
+    # Capped low on purpose — talking builds a career, it does not replace one.
+    if st.get("promos"):
+        s += min(6.0, 0.7 * st["promos"])
+        if st.get("avg_promo"):
+            s += 0.10 * (st["avg_promo"] - 55.0)
     s += 0.12 * (st["momentum"] - 50)
     s += 0.06 * (st["feud_heat"] - 25)
     return max(0.0, min(100.0, s))
@@ -951,6 +992,9 @@ def _reason(con, st: dict, cat: str, delta: int, score: float, ctx: dict) -> str
         bits.append(f"{st['weeks_top10']} week{'s' if st['weeks_top10'] != 1 else ''} in the Power 10")
     if st["nominations"]:
         bits.append(f"{st['nominations']} award nomination{'s' if st['nominations'] != 1 else ''}")
+    if st.get("promos"):
+        bits.append(f"{st['promos']} promo{'s' if st['promos'] != 1 else ''}"
+                    + (f" averaging {st['avg_promo']:.0f}" if st.get("avg_promo") else ""))
     verb = "up" if delta > 0 else "down"
     return f"Season score {score:.0f}/100 — {', '.join(bits)}. {cat.title()} {verb} {abs(delta)}."
 

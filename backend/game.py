@@ -107,8 +107,26 @@ CREATE TABLE IF NOT EXISTS wrestler_bio (
     bio         TEXT,
     updated_at  TEXT
 );
+CREATE TABLE IF NOT EXISTS sim_promo (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    show_id  INTEGER NOT NULL REFERENCES show(id),
+    slot     INTEGER NOT NULL,
+    kind     TEXT NOT NULL,
+    quality  REAL,
+    feud_id  INTEGER REFERENCES feud(id),
+    topic    TEXT,
+    note     TEXT
+);
+CREATE TABLE IF NOT EXISTS sim_promo_participant (
+    promo_id    INTEGER NOT NULL REFERENCES sim_promo(id),
+    wrestler_id INTEGER NOT NULL REFERENCES wrestler(id),
+    seat        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (promo_id, wrestler_id)
+);
 CREATE INDEX IF NOT EXISTS idx_event_date ON event_log(on_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_feud_status ON feud(status);
+CREATE INDEX IF NOT EXISTS idx_promo_show ON sim_promo(show_id, slot);
+CREATE INDEX IF NOT EXISTS idx_promo_part ON sim_promo_participant(wrestler_id);
 """
 
 
@@ -118,8 +136,14 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     # per-row fields (match stipulation, show city/cost) are added here.
     def _cols(t):
         return {r[1] for r in con.execute(f"PRAGMA table_info({t})")}
-    if "stipulation" not in _cols("sim_match"):
+    mcols = _cols("sim_match")
+    if "stipulation" not in mcols:
         con.execute("ALTER TABLE sim_match ADD COLUMN stipulation TEXT")
+    # The STRUCTURE of the match (singles, tag, triple threat, fatal 4-way …),
+    # separate from the stipulation which is the rules. NULL on rows written
+    # before match types existed; readers infer the shape from the sides.
+    if "match_type" not in mcols:
+        con.execute("ALTER TABLE sim_match ADD COLUMN match_type TEXT")
     scols = _cols("show")
     if "city" not in scols:
         con.execute("ALTER TABLE show ADD COLUMN city TEXT")
@@ -1833,7 +1857,8 @@ def approve_proposal(con: sqlite3.Connection, pid: int) -> dict:
     elif p["kind"] == "show":
         import sim
         result = sim.run_show(con, payload["brand_id"], payload["name"], payload["card"],
-                              is_ppv=payload.get("is_ppv", False), ppv_name=payload.get("ppv_name"))
+                              is_ppv=payload.get("is_ppv", False), ppv_name=payload.get("ppv_name"),
+                              promo_card=payload.get("promos") or [])
     elif p["kind"] == "trade":
         result = resolve_trade(con, payload["offer_id"], True)
     else:
@@ -1906,11 +1931,20 @@ def propose_ai_show(con: sqlite3.Connection, is_ppv: bool = False) -> dict:
     if not ai:
         raise SigningError("no AI brand is set")
     import sim
-    card = sim.auto_card(con, ai, 4)
+    import autobook
+    # The proposal has to be a full SHOW, not just matches: the format is four
+    # matches and two promos on television and six on a pay-per-view, and an
+    # approval that ran half a card would quietly break it.
+    kind = "ppv" if is_ppv else "tv"
+    fmt = autobook.SHOW_FORMATS[kind]
+    card = sim.auto_card(con, ai, fmt["matches"], kind)
+    promo_card = sim.auto_promos(con, ai, fmt["promos"], kind)
     name = calendar(con).get("ppv") if is_ppv else f"{ai} show"
-    summary = f"{ai} (AI) proposes a {len(card)}-match card" + (" for the PPV" if is_ppv else "")
+    summary = (f"{ai} (AI) proposes a {len(card)}-match, {len(promo_card)}-promo card"
+               + (" for the PPV" if is_ppv else ""))
     pid = create_proposal(con, "show", summary,
                           {"brand_id": ai, "name": name, "card": card,
+                           "promos": promo_card,
                            "is_ppv": is_ppv, "ppv_name": name if is_ppv else None}, ai)
     return {"proposal_id": pid, "summary": summary}
 
@@ -2206,35 +2240,46 @@ def _days_in_month(year: int, month: int) -> int:
     return (nxt - date(year, month, 1)).days
 
 
-def _season_snme(seed: int, year: int) -> tuple[int, int]:
-    """One Saturday Night's Main Event per season, scattered spring–autumn.
+SNME_PER_MONTH = 2
 
-    Deterministic from the save seed and year, so the calendar is stable across
-    reloads but different season to season.
+
+def month_snme(seed: int, year: int, month: int) -> list[int]:
+    """The two Saturday Night's Main Event dates in a month.
+
+    Two a month rather than one a season, so the calendar has a big Saturday
+    every fortnight to build television toward — the pay-per-view is no longer
+    the only date on the sheet that matters.
+
+    Deterministic from the save seed, the year and the month, so the calendar is
+    stable across reloads and different from month to month. They are spread
+    apart on purpose (one in each half of the month) rather than drawn at random,
+    which would happily put both on consecutive weekends.
     """
     import random
-    rng = random.Random(seed * 7919 + year)
-    month = rng.choice([3, 4, 5, 6, 7, 8, 9, 10])
     saturdays = [d for d in range(1, _days_in_month(year, month) + 1)
                  if date(year, month, d).weekday() == 5]
-    return month, rng.choice(saturdays)
+    if len(saturdays) <= SNME_PER_MONTH:
+        return saturdays
+    rng = random.Random(seed * 7919 + year * 100 + month)
+    mid = len(saturdays) // 2
+    return sorted([rng.choice(saturdays[:mid]), rng.choice(saturdays[mid:])])
 
 
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def month_shows(seed: int, year: int, month: int) -> list[dict]:
-    """Every show due in a month: Raw each Monday, SmackDown each Friday, the
-    pay-per-view on the last Sunday, and the season's one SNME if it falls here."""
+    """Every show due in a month: Raw each Monday, SmackDown each Friday, two
+    Saturday Night's Main Events, and the pay-per-view on the last Sunday."""
     ppv_day = _last_sunday(year, month)
-    snme_month, snme_day = _season_snme(seed, year)
+    snme_days = set(month_snme(seed, year, month))
     shows = []
     for day in range(1, _days_in_month(year, month) + 1):
         wd = date(year, month, day).weekday()
         if wd == 6 and day == ppv_day:
             shows.append({"day": day, "weekday": "Sun", "type": "PPV",
                           "name": ppv_for_month(month, year)})
-        elif month == snme_month and day == snme_day:
+        elif day in snme_days:
             shows.append({"day": day, "weekday": "Sat", "type": "SNME",
                           "name": "Saturday Night's Main Event"})
         elif wd == 0:
@@ -2251,7 +2296,7 @@ def calendar(con: sqlite3.Connection) -> dict:
         return {"active": False}
     d = date.fromisoformat(st["current_date"])
     year, seed = st["season_year"], st["rng_seed"]
-    snme_month, snme_day = _season_snme(seed, year)
+    snme_days = month_snme(seed, year, d.month)
     first_weekday = date(year, d.month, 1).weekday()   # 0=Mon .. 6=Sun
     return {
         "active": True, "date": st["current_date"], "season_year": year,
@@ -2261,7 +2306,7 @@ def calendar(con: sqlite3.Connection) -> dict:
         "days_in_month": _days_in_month(year, d.month),
         "first_weekday": first_weekday,
         "shows": month_shows(seed, year, d.month),
-        "snme": {"month": snme_month, "month_name": MONTHS[snme_month - 1], "day": snme_day},
+        "snme_days": snme_days,
         "is_finale": d.month == 12,     # WrestleMania month ends the season
         "schedule": [{"month": m, "month_name": MONTHS[m - 1], "name": PPV_SCHEDULE[m]}
                      for m in range(1, 13)],

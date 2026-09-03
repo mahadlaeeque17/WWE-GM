@@ -52,7 +52,8 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
   const nextNumber = (b: string) => shows.filter((s) => s.brand_id === b).length + 1
 
   const runAuto = useMutation({
-    mutationFn: () => runShow(brandId, `${brand?.name} #${nextNumber(brandId)}`, matches),
+    mutationFn: () => runShow(brandId, `${brand?.name} #${nextNumber(brandId)}`, matches,
+                              false, undefined, 'tv'),
     onSuccess: (r) => { setErr(null); invalidate(r.show_id) },
     onError: (e: Error) => setErr(e.message),
   })
@@ -63,8 +64,10 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
     onError: (e: Error) => setErr(e.message),
   })
 
+  // A pay-per-view is a six-match co-branded card whether it is auto-booked or
+  // hand-booked, so the count comes from the format rather than the picker.
   const runPPV = useMutation({
-    mutationFn: () => runShow(brandId, calendar!.ppv!, matches, true, calendar!.ppv!),
+    mutationFn: () => runShow(brandId, calendar!.ppv!, 6, true, calendar!.ppv!, 'ppv'),
     onSuccess: (r) => { setErr(null); invalidate(r.show_id) },
     onError: (e: Error) => setErr(e.message),
   })
@@ -137,15 +140,16 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
                 {runAuto.isPending ? 'Running…' : `▶ Run ${brand?.name}`}
               </button>
               <p className="text-[11px] text-slate-600 mt-2 leading-snug">
-                Cards auto-booked by strength — main event last, title on the main event.
+                Pre-booked the same way the card screen suggests: rivalries first, the belt on the
+                main event, face against heel — plus two promo segments.
               </p>
             </div>
           )}
 
           {mode === 'manual' && (
             <p className="text-[11px] text-slate-500 leading-snug">
-              Build the card and pick each match's stipulation on the right — the last match is the
-              main event and counts double. Hit Confirm Booking to run the show.
+              The card on the right arrives PRE-BOOKED — four matches and two promos, six matches on
+              a pay-per-view. Change anything you disagree with, then hit Confirm Booking.
             </p>
           )}
 
@@ -193,6 +197,7 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
               </div>
               <div className="text-[11px] text-slate-500">
                 {s.held_on} · {s.matches} matches
+                {s.promos ? ` · ${s.promos} promos` : ''}
                 {s.attendance ? ` · ${s.attendance.toLocaleString()} in` : ''}
               </div>
             </button>
@@ -210,8 +215,8 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
           <div className="max-w-[560px]">
             <h2 className="display text-[20px] mb-1">Season calendar</h2>
             <p className="text-xs text-slate-500 mb-4">
-              Raw every Monday, SmackDown every Friday, the pay-per-view on the last Sunday, and one
-              Saturday Night's Main Event a year. The road runs to WrestleMania in December.
+              Raw every Monday, SmackDown every Friday, two Saturday Night's Main Events a month,
+              and the pay-per-view on the last Sunday. The road runs to WrestleMania in December.
             </p>
             {calendar?.active
               ? <CalendarView cal={calendar} />
@@ -294,9 +299,19 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
               style={{ animationDelay: `${mi * 110}ms` }}>
               <div className="flex justify-between items-start">
                 <div className="flex-1 min-w-0">
-                  <div className="text-[10px] text-slate-600 uppercase tracking-wider mb-1">
-                    {isMain ? 'Main event' : `Match ${m.slot}`}
-                    {m.title_id && <span className="text-gold ml-2">◆ championship</span>}
+                  <div className="text-[10px] text-slate-600 uppercase tracking-wider mb-1 flex items-center gap-2 flex-wrap">
+                    <span>{isMain ? 'Main event' : `Match ${m.slot}`}</span>
+                    {m.match_type && m.match_type !== 'singles' && (
+                      <span className="text-slate-300 px-1.5 py-[1px] rounded bg-raised normal-case">
+                        {m.match_type_label ?? m.match_type}
+                      </span>
+                    )}
+                    {m.stipulation && m.stipulation !== 'normal' && (
+                      <span className="text-gold px-1.5 py-[1px] rounded bg-gold/15 normal-case">
+                        {STIP_LABEL[m.stipulation] ?? m.stipulation}
+                      </span>
+                    )}
+                    {m.title_id && <span className="text-gold">◆ championship</span>}
                   </div>
                   <div className="flex items-center gap-3 flex-wrap">
                     {sides.map((side, i) => {
@@ -339,6 +354,57 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
           )
         })}
       </div>
+
+      {/* The talking half of the night. Rendered after the matches because that
+          is the order it ran in, and separately because a promo is scored on a
+          different thing than a match. */}
+      {!!detail.promos?.length && (
+        <div className="mt-5">
+          <h3 className="label text-[10px] text-slate-500 mb-2 tracking-wider">Promo segments</h3>
+          <div className="space-y-2">
+            {detail.promos.map((p: any, pi: number) => (
+              <div key={p.id} className="bg-panel border border-emerald-400/25 rounded p-3 pop-in"
+                style={{ animationDelay: `${pi * 90}ms` }}>
+                <div className="flex justify-between items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[10px] text-emerald-400 uppercase tracking-wider mb-1">
+                      🎤 {p.label ?? p.kind}
+                      {p.topic && <span className="text-slate-500 ml-2 normal-case">{p.topic}</span>}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex -space-x-2">
+                        {p.participants.map((x: any) => <PFace key={x.wrestler_id} p={x} won={false} />)}
+                      </div>
+                      <span className="text-sm text-slate-300">
+                        {p.participants.map((x: any) => x.name).join(' & ')}
+                      </span>
+                    </div>
+                    {!!p.feud_id && (
+                      <div className="text-[11px] text-slate-500 mt-1">built a rivalry</div>
+                    )}
+                  </div>
+                  <div className="flex flex-col items-end shrink-0">
+                    <span className={`text-lg font-bold tnum ${qualityColour(p.quality)}`}>
+                      {p.quality?.toFixed(1)}
+                    </span>
+                    <Stars quality={p.quality} size={12} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-600 mt-2">
+            Promos count toward the show rating at half the weight of a match.
+          </p>
+        </div>
+      )}
     </>
   )
+}
+
+/** Stipulation keys are stable; the labels only exist to be read. */
+const STIP_LABEL: Record<string, string> = {
+  submission: 'Submission', no_dq: 'No DQ', tables: 'Tables', hardcore: 'Hardcore',
+  steel_cage: 'Steel Cage', ladder: 'Ladder', last_standing: 'Last Woman Standing',
+  extreme: 'Extreme Rules', tlc: 'TLC', iron_woman: 'Iron Woman',
 }

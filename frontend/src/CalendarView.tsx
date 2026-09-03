@@ -73,7 +73,7 @@ export default function CalendarView({ cal, compact }: { cal: Calendar; compact?
           <span key={k} className="flex items-center gap-1.5 text-[10px] text-slate-500">
             <span className="w-2.5 h-2.5 rounded-sm" style={{ background: v.fg }} />
             {k === 'RAW' ? 'Raw · Mon' : k === 'SMACKDOWN' ? 'SmackDown · Fri'
-              : k === 'PPV' ? 'PPV · last Sun' : 'SNME · a Saturday'}
+              : k === 'PPV' ? 'PPV · last Sun' : 'SNME · two Saturdays'}
           </span>
         ))}
       </div>

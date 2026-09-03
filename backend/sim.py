@@ -28,6 +28,8 @@ from datetime import date, datetime, timedelta
 
 import game
 import booking
+import matches as MT
+import promos as PR
 import rankings
 
 # How much each category contributes to in-ring match quality.
@@ -186,14 +188,23 @@ def simulate_match(
     is_ppv: bool = False,
     stipulation: str | None = None,
     prod_bonus: float = 0.0,
+    match_type: str | None = None,
 ) -> dict:
     """Resolve one match. `teams` is a list of sides, each a list of wrestler ids.
+
+    `match_type` is the STRUCTURE (singles, tag, triple threat, fatal 4-way …)
+    and `stipulation` the RULES (steel cage, tables, no-DQ). They compose; see
+    matches.py for why they are separate axes.
 
     Returns the result WITHOUT writing it — the caller commits, so a whole show
     can be simulated and inspected before anything is persisted.
     """
     if len(teams) < 2 or any(not t for t in teams):
         raise ValueError("a match needs at least two non-empty sides")
+    # A card row written before match types existed (or by the auto/AI booker)
+    # carries no type — name its shape rather than refusing it.
+    match_type = match_type or MT.infer(teams)
+    MT.validate(match_type, teams)
 
     rng = _rng(seed, show_id, slot)
     everyone = [w for t in teams for w in t]
@@ -251,7 +262,10 @@ def simulate_match(
             break
 
     stip = booking.stip(stipulation)
-    draw = rng.random() < 0.04
+    mt = MT.get(match_type)
+    # A three-or-more-corner match almost never ends in a draw — somebody always
+    # steals the pin, which is the whole appeal of the shape.
+    draw = rng.random() < (0.015 if len(teams) > 2 else 0.04)
     if stip["no_dq"]:
         # No-DQ stipulations can't end on a DQ or countout — it's anything goes.
         finish = "draw" if draw else rng.choices(["pinfall", "submission"], weights=[75, 25])[0]
@@ -311,12 +325,25 @@ def simulate_match(
     quality = _clamp(base * 0.78 + heat * 0.18 + variance + slot_bonus
                      + title_bonus + chemistry + morale_bonus
                      + alignment_bonus + ppv_bonus + dq_penalty + feud_bonus
-                     + stip["quality"] + prod_bonus)
+                     + stip["quality"] + prod_bonus + mt["quality"])
+
+    # --- who took the fall -------------------------------------------------
+    # In a multi-corner match only ONE woman is actually beaten, and protecting
+    # the other losers is most of the reason to book the shape: a fatal 4-way
+    # lets three women leave without being pinned. The fall goes to the weakest
+    # side that did not win.
+    fell_team = None
+    if not draw and len(teams) > 2 and finish in ("pinfall", "submission"):
+        losers = [i for i in range(len(teams)) if i != winner_idx]
+        fell_team = min(losers, key=lambda i: team_strength[i])
 
     # --- injuries ----------------------------------------------------------
+    # A cage/ladder/TLC match and a chaotic multi-corner match are both harder
+    # on the body than a clean singles.
+    risk = mt["fatigue"] * (1.0 + stip["quality"] * 0.05)
     injured = []
     for wid in everyone:
-        chance = BASE_INJURY_CHANCE * (1 + state[wid]["fatigue"] / 120)
+        chance = BASE_INJURY_CHANCE * risk * (1 + state[wid]["fatigue"] / 120)
         age = attrs[wid].get("age")
         if age:
             chance *= 1 + max(0, age - 35) * 0.03
@@ -339,16 +366,20 @@ def simulate_match(
         "title_tier": title_tier,
         "title_prestige": prestige if title_id else None,
         "stipulation": stipulation,
+        "match_type": match_type,
+        "match_type_label": mt["label"],
+        "fell_team": fell_team,
+        "fatigue_cost": round(FATIGUE_PER_MATCH * mt["fatigue"]),
         "injured": injured,
     }
 
 
 def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict) -> int:
     cur = con.execute(
-        "INSERT INTO sim_match (show_id, slot, title_id, quality, finish, stipulation) "
-        "VALUES (?,?,?,?,?,?)",
+        "INSERT INTO sim_match (show_id, slot, title_id, quality, finish, stipulation, "
+        "match_type) VALUES (?,?,?,?,?,?,?)",
         (show_id, res["slot"], res["title_id"], res["quality"], res["finish"],
-         res.get("stipulation")),
+         res.get("stipulation"), res.get("match_type")),
     )
     match_id = cur.lastrowid
 
@@ -362,6 +393,13 @@ def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict)
 
     everyone = [w for t in res["teams"] for w in t]
     is_main = res.get("is_main_event", False)
+    # Multi-corner match: only the side that took the fall is treated as beaten
+    # for morale and momentum. Everyone else lost the match but was not beaten,
+    # and the numbers should say so.
+    fell = res.get("fell_team")
+    protected = {w for i, t in enumerate(res["teams"]) for w in t
+                 if fell is not None and i != fell and i != res["winner_team"]}
+    fatigue_cost = res.get("fatigue_cost") or FATIGUE_PER_MATCH
     # A manager belt is decided by the wrestlers but held by their managers, so
     # the wrestlers themselves get no personal title-morale swing for it.
     is_title = res["title_id"] is not None
@@ -373,6 +411,8 @@ def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict)
         # Morale: winning lifts it, losing dents it, and the context matters —
         # winning a belt is a high, being pinned clean in the opener is a low.
         dm = MORALE["draw"] if res["finish"] == "draw" else (MORALE["win"] if won else MORALE["loss"])
+        if wid in protected:
+            dm = MORALE["draw"]          # she lost the match but was not beaten
         if is_wrestler_title and res["finish"] in ("pinfall", "submission"):
             dm += MORALE["title_win"] if won else (MORALE["title_loss"] if lost else 0)
         if is_main:
@@ -391,8 +431,8 @@ def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict)
                  morale      = MAX(0, MIN(100, morale + ?))
                WHERE wrestler_id = ?""",
             (1 if won else 0, 1 if lost else 0, 1 if res["finish"] == "draw" else 0,
-             FATIGUE_PER_MATCH,
-             8 if won else (-6 if lost else 0),
+             fatigue_cost,
+             8 if won else (-2 if wid in protected else (-6 if lost else 0)),
              dm,
              wid),
         )
@@ -475,12 +515,15 @@ def run_show(
     is_ppv: bool = False,
     ppv_name: str | None = None,
     logistics: dict | None = None,
+    promo_card: list[dict] | None = None,
 ) -> dict:
     """Simulate and persist a full show.
 
-    `card` is an ordered list of {"teams": [[id,...],[id,...]], "title_id": int|None,
-    "stipulation": str|None}. `logistics` (arena/production/effects/advertising)
-    spends money for a bigger, better show and settles the week's finances.
+    `card` is an ordered list of {"teams": [[id,...],[id,...]], "match_type":
+    str|None, "title_id": int|None, "stipulation": str|None}. `promo_card` is the
+    talking half — an ordered list of {"kind": str, "wrestler_ids": [id,...]}.
+    `logistics` (arena/production/effects/advertising) spends money for a bigger,
+    better show and settles the week's finances.
     """
     state = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
     if state is None:
@@ -489,13 +532,35 @@ def run_show(
     seed = state["rng_seed"]
     ls = booking.logistics_summary(logistics)
     prod_bonus = ls["quality"]
+    promo_card = promo_card or []
+    PR.ensure_schema(con)
 
     if not card:
         raise ValueError("a show needs at least one match")
 
+    # Validate every shape BEFORE anything is written, so a bad row on match 4
+    # cannot leave three simulated matches behind.
+    for i, m in enumerate(card, start=1):
+        mtype = m.get("match_type") or MT.infer(m["teams"])
+        try:
+            MT.validate(mtype, m["teams"])
+        except ValueError as e:
+            raise ValueError(f"Match {i}: {e}") from None
+    for i, p in enumerate(promo_card, start=1):
+        try:
+            PR.validate(p.get("kind"), p.get("wrestler_ids") or [])
+        except ValueError as e:
+            raise ValueError(f"Promo {i}: {e}") from None
+
     booked = [w for m in card for t in m["teams"] for w in t]
     if len(booked) != len(set(booked)):
         raise ValueError("a wrestler is booked in more than one match on this card")
+
+    # A promo and a match are different segments of the same night, so somebody
+    # can do both — but not two promos.
+    talkers = [w for p in promo_card for w in (p.get("wrestler_ids") or [])]
+    if len(talkers) != len(set(talkers)):
+        raise ValueError("a wrestler is in more than one promo segment on this card")
 
     # A Manager's Championship match is two wrestlers fighting on behalf of two
     # managers — validate the managers up front so a half-booked belt match never
@@ -519,6 +584,8 @@ def run_show(
                     nm = con.execute("SELECT name FROM wrestler WHERE id=?", (mid,)).fetchone()
                     raise ValueError(f"{nm[0] if nm else mid} is not a signed manager")
 
+    # Injury gates MATCHES only. A woman on the shelf can still come out and
+    # talk, which is how a feud survives an injury instead of dying with it.
     for wid in booked:
         s = con.execute("SELECT injured_until FROM wrestler_state WHERE wrestler_id=?",
                         (wid,)).fetchone()
@@ -546,7 +613,8 @@ def run_show(
     results = []
     for slot, m in enumerate(card, start=1):
         res = simulate_match(con, show_id, slot, m["teams"], seed, m.get("title_id"),
-                             is_ppv=is_ppv, stipulation=m.get("stipulation"), prod_bonus=prod_bonus)
+                             is_ppv=is_ppv, stipulation=m.get("stipulation"),
+                             prod_bonus=prod_bonus, match_type=m.get("match_type"))
         res["is_main_event"] = (slot == len(card))
         # Manager belt: the winning side's manager becomes/stays champion.
         if res.get("title_tier") == "manager" and m.get("managers") and res["winner_team"] is not None:
@@ -556,9 +624,23 @@ def run_show(
         _apply_match(con, show_id, held_on, res)
         results.append(res)
 
-    # The main event counts double toward how the night is remembered.
+    # Promos run after the matches so a segment can react to what the crowd has
+    # already seen; slots continue the card's numbering.
+    promo_results = []
+    for i, p in enumerate(promo_card):
+        pres = PR.simulate_promo(con, show_id, len(card) + i + 1, p.get("kind") or PR.DEFAULT,
+                                 p.get("wrestler_ids") or [], seed,
+                                 topic=p.get("topic"), is_ppv=is_ppv)
+        PR.apply_promo(con, show_id, pres)
+        promo_results.append(pres)
+
+    # The main event counts double toward how the night is remembered; a promo
+    # counts half, because a great segment is a great segment but the main event
+    # is what the night IS.
     qualities = [r["quality"] for r in results]
     weights = [1.0] * (len(qualities) - 1) + [2.0]
+    qualities += [r["quality"] for r in promo_results]
+    weights += [PR.PROMO_SHOW_WEIGHT] * len(promo_results)
     show_rating = sum(q * w for q, w in zip(qualities, weights)) / sum(weights)
 
     # Attendance & finances. A booked show (logistics present) draws its house
@@ -577,11 +659,13 @@ def run_show(
     con.execute("UPDATE show SET rating=?, attendance=? WHERE id=?",
                 (round(show_rating, 1), attendance, show_id))
 
-    # PPV appearances are a career milestone — credit everyone who worked it.
-    if is_ppv and booked:
+    # PPV appearances are a career milestone — credit everyone who worked it,
+    # in a match or on the mic.
+    appeared = sorted(set(booked) | set(talkers))
+    if is_ppv and appeared:
         con.execute(
             "UPDATE wrestler_state SET ppv_appearances = ppv_appearances + 1 "
-            f"WHERE wrestler_id IN ({','.join('?' * len(booked))})", booked)
+            f"WHERE wrestler_id IN ({','.join('?' * len(appeared))})", appeared)
 
     # Everyone not booked recovers a little — but a wrestler left off her own
     # brand's show entirely loses a touch of morale (nobody likes catering duty).
@@ -592,12 +676,16 @@ def run_show(
              AND c.start_year<=? AND c.end_year>=?""",
         (brand_id, state["season_year"], state["season_year"]),
     )]
-    idle = [w for w in on_this_brand if w not in booked]
+    idle = [w for w in on_this_brand if w not in appeared]
     con.execute(
         "UPDATE wrestler_state SET fatigue = MAX(0, fatigue - ?) WHERE wrestler_id NOT IN "
-        f"({','.join('?' * len(booked))})",
-        [FATIGUE_RECOVERY_PER_DAY * 7] + booked,
+        f"({','.join('?' * len(appeared))})",
+        [FATIGUE_RECOVERY_PER_DAY * 7] + appeared,
     )
+    # A pay-per-view is a co-branded night: nobody is "left off her own brand's
+    # show" by a card that was only ever going to hold six matches.
+    if is_ppv:
+        idle = []
     if idle:
         con.execute(
             "UPDATE wrestler_state SET morale = MAX(0, MIN(100, morale + ?)) "
@@ -623,17 +711,47 @@ def run_show(
     return {
         "show_id": show_id, "name": name, "brand_id": brand_id, "held_on": held_on,
         "rating": round(show_rating, 1), "attendance": attendance, "city": city, "cost": cost,
-        "is_ppv": is_ppv, "ppv_name": ppv_name, "matches": results, "ledger": ledger,
+        "is_ppv": is_ppv, "ppv_name": ppv_name, "matches": results,
+        "promos": promo_results, "ledger": ledger,
     }
 
 
-def auto_card(con: sqlite3.Connection, brand_id: str, matches: int = 4) -> list[dict]:
+def auto_card(con: sqlite3.Connection, brand_id: str, matches: int = 4,
+              kind: str = "tv") -> list[dict]:
     """Build a plausible card from the brand's healthy roster.
 
-    Pairs by overall so matches are competitive, and puts the strongest available
-    pairing on last. Used for quick sims and as the rival GM's booking until the
-    Groq layer takes that over.
+    Delegates to the real booker in autobook.py — rivalries first, belts on the
+    biggest match, face-vs-heel, stamina respected, mixed shapes — and only falls
+    back to the old pair-by-overall ladder if that cannot produce a card (a very
+    thin roster, or a save with nothing booked yet). Keeping the fallback means a
+    quick sim never dies because there are no feuds to build a story from.
     """
+    try:
+        import autobook                              # noqa: PLC0415 — avoid a cycle
+        sug = autobook.suggest(con, brand_id, kind)
+        if len(sug["matches"]) >= min(2, matches):
+            out = sug["matches"][:matches]
+            for m in out:
+                m.pop("why", None)
+                m.pop("slot", None)
+            return out
+    except (ValueError, KeyError):
+        pass
+    return _ladder_card(con, brand_id, matches)
+
+
+def auto_promos(con: sqlite3.Connection, brand_id: str, count: int = 2,
+                kind: str = "tv") -> list[dict]:
+    """The talking half of an auto-booked show, in the same suggestion shape."""
+    try:
+        import autobook                              # noqa: PLC0415
+        return autobook.suggest(con, brand_id, kind)["promos"][:count]
+    except (ValueError, KeyError):
+        return []
+
+
+def _ladder_card(con: sqlite3.Connection, brand_id: str, matches: int = 4) -> list[dict]:
+    """The original booker: pair by overall, best pairing last. The fallback."""
     state = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
     season, today = state["season_year"], state["current_date"]
 

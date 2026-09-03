@@ -35,19 +35,69 @@ asks the AI to decide a match.
 | `backend/` | FastAPI app — sim, GM layer, rankings, AI endpoints |
 | `frontend/` | Vite + React UI |
 | `harvester/` | Roster construction and the attribute engine |
-| `data/gm2000.db` | The save: 270 wrestlers, seeded and hand-tuned |
+| `data/gm2000.db` | The save: the seeded, hand-tuned roster |
 | `PLAN.md` | Design document — every rule and why it is that rule |
 | `DEPLOY.md` | Hosting — it runs free on Vercel, and how the save survives |
 | `harvester/NOTES.md` | Data quirks and traps. Read before trusting a number |
 
+## The show format
+
+Every night runs to a shape, and it arrives **pre-booked** — the card screen
+opens on a full show that creative has already put together, and your job is to
+decide what is wrong with it.
+
+| Show | | |
+|---|---|---|
+| Raw · Monday, SmackDown · Friday | 4 matches | 2 promo segments |
+| Saturday Night's Main Event — **two a month** | 4 matches | 2 promo segments |
+| Pay-per-view · last Sunday | 6 matches, **3 from each brand** | 2 promo segments |
+
+The pre-booker works in priority order: **rivalries first** (a feud at blow-off
+heat gets a stipulation to match), then **belts** on the biggest match, then
+**face against heel**, ordered so **star power climbs** to the main event, with
+**stamina respected** and shapes mixed. Every row tells you why it is there, and
+every row is one dropdown away from being something else.
+
+**Match structures** are a separate axis from **stipulations**, so they compose —
+a Fatal 4-Way inside a Steel Cage needs no entry of its own.
+
+- Structures: Singles, Tag (2 v 2), Six-Woman Tag (3 v 3), Triple Threat,
+  Fatal 4-Way, Triple Threat Tag, Handicap, Gauntlet, Battle Royal
+- Stipulations: Submission, No DQ, Tables, Hardcore, Steel Cage, Ladder,
+  Last Woman Standing, Extreme Rules, TLC, Iron Woman
+
+In a multi-corner match only the woman who **takes the fall** is treated as
+beaten — protecting the other losers is most of the reason to book the shape.
+
+## Promos
+
+Talking is the cheap way to build a rivalry — almost no stamina, no injury risk —
+and a match is the expensive way to cash it in. That trade-off is why two promo
+slots sit on every card. Ten types, each with its own effects: a **contract
+signing** builds a lot of heat, a **run-in beatdown** swings momentum hard toward
+the aggressor, a **title presentation** adds prestige to the belt. A promo is
+scored on **mic work** first, so a roster has two kinds of value, and it counts
+toward the show rating at half the weight of a match.
+
+A woman on the injury shelf can still come out and talk, which is how a feud
+survives an injury instead of dying with it.
+
 ## The rating system
 
-Four categories, each out of 25, summing to a 0–100 overall.
+Five categories, each out of 20, summing to a 0–100 overall.
 
-- **Experience** — earned in *your* sim, not from real life. Everyone starts at 0.
-- **Charisma**, **Popularity**, **Looks** — seeded from the source data, fully
-  editable, and now they *move*: the progression engine grades each season and
-  proposes growth or regression, which only the GM can approve.
+- **Achievements** — earned in *your* save, not from real life. Everyone starts
+  at 0; you raise it by winning things, never by typing a number.
+- **Wrestling** — in-ring ability. What you edit is the stored base; the number
+  shown adds a live swing from her win/loss record in this save.
+- **Popularity**, **Looks**, **Personal** — seeded from the source data (Looks and
+  Personal are yours outright) and fully editable.
+
+Wrestling and Popularity *move*: the progression engine grades a season from what
+actually happened — record, match quality against the league, main events, title
+reigns, Power 10 weeks, promo work — and **proposes** growth or regression.
+Nothing reaches a rating until the GM approves it, and she can approve it at a
+different number.
 
 Your edits live in a separate `attribute_override` table that the roster
 rebuild never touches, so re-running the harvest cannot wipe a hand-tuned
