@@ -154,6 +154,8 @@ export interface ShowSummary {
   id: number; brand_id: string; name: string; held_on: string
   rating: number | null; attendance: number | null; matches: number; promos: number
   is_ppv: number; ppv_name: string | null
+  /** The scoreboard: what the night drew on TV, or what a pay-per-view sold. */
+  tv_rating: number | null; buyrate: number | null
 }
 
 export interface CalendarShow {
@@ -167,7 +169,8 @@ export interface Calendar {
   /** The two Saturday Night's Main Event days in the current month. */
   snme_days?: number[]
   is_finale?: boolean
-  schedule: { month: number; month_name: string; name: string }[]
+  /** `date` is the day the show lands on, computed server-side — see game.calendar. */
+  schedule: { month: number; month_name: string; name: string; date: string }[]
 }
 
 /** 0-100 match quality → 0-5 stars in half-star steps. */
@@ -293,11 +296,20 @@ export const renameWrestler = (id: number, display_name: string | null) =>
 export const saveBio = (id: number, nickname: string | null, bio: string | null) =>
   req<any>(`/api/wrestler/${id}/bio`, { method: 'POST', body: JSON.stringify({ nickname, bio }) })
 
-// There is no free-agent signing — contracts are only created through the draft.
-export const extendContract = (wrestler_id: number, years: number, annual_value?: number) =>
+/**
+ * Re-sign somebody already on the roster.
+ *
+ * This is a NEGOTIATION: the salary, the perks and the length are all put to
+ * her together, and she can refuse. `annual_value` omitted means "pay whatever
+ * she asks". Use `extensionOffer` first to see her verdict without committing.
+ */
+export const extendContract = (
+  wrestler_id: number, years: number, annual_value?: number,
+  perks: string[] = [], signing_bonus = 0,
+) =>
   req<any>('/api/contracts/extend', {
     method: 'POST',
-    body: JSON.stringify({ wrestler_id, years, annual_value }),
+    body: JSON.stringify({ wrestler_id, years, annual_value, perks, signing_bonus }),
   })
 
 export const fetchDraft = (kind = 'wrestler') => req<DraftBoard>(`/api/draft?kind=${kind}`)
@@ -935,3 +947,221 @@ export interface StoreStatus {
 }
 
 export const fetchStoreStatus = () => req<StoreStatus>('/api/store/status')
+
+// ============================================================ the locker room
+//
+// How the roster feels, what it is asking for, who is hurt, and who the crowd
+// wants turned. One endpoint because the screen is useless in pieces — a
+// request only makes sense next to the morale that caused it.
+
+/** One standing condition acting on her morale, with the lever the GM has. */
+export interface MoraleFactor {
+  key: string; label: string; delta: number; detail: string; fix: string | null
+}
+export interface PayPosition {
+  under_contract: boolean
+  salary?: number; market?: number; ratio?: number
+  verdict?: 'overpaid' | 'generous' | 'fair' | 'underpaid' | 'insulted'
+  label?: string; gap?: number; contract_id?: number; years_left?: number
+  perks?: string[]
+}
+export interface MoraleSnapshot {
+  wrestler_id: number; name: string
+  morale: number; band: string; band_note: string; rock_bottom: boolean
+  personality: string; personality_label: string
+  pay: PayPosition
+  factors: MoraleFactor[]
+  monthly_drift: number
+  stamina: number
+  rested_until: string | null; injured_until: string | null
+  brand_id?: string
+  headline?: string
+}
+
+export interface WrestlerRequest {
+  id: number; wrestler_id: number; brand_id: string | null
+  kind: string; label: string; icon: string
+  severity: 'ask' | 'firm' | 'final'
+  ask_value: number | null; ask_target: number | null; target_name: string | null
+  reason: string; detail: string | null
+  status: string; created_on: string; expires_on: string | null
+  times_asked: number
+  name: string; morale: number; band: string; stamina: number
+  can_force: boolean
+}
+
+export interface MedicalRow {
+  wrestler_id: number; name: string; brand_id: string
+  stamina: number; fatigue: number
+  risk: number; level: 'fine' | 'elevated' | 'risky' | 'reckless'
+  reasons: string[]
+  out: boolean; resting: boolean
+  injured_until: string | null; rested_until: string | null
+  injury_note: string | null; injury_severity: string | null
+  weeks_left?: number
+}
+export interface MedicalReport {
+  out: MedicalRow[]; resting: MedicalRow[]; at_risk: MedicalRow[]
+  returning: MedicalRow[]
+  severities?: { key: string; label: string; note: string }[]
+}
+
+export interface TurnSuggestion {
+  id: number; wrestler_id: number; name: string
+  from_align: string; to_align: string
+  trigger: string; trigger_label: string
+  reason: string; evidence: string | null; score: number
+  status: string; created_on: string
+}
+
+export interface ForcedMove {
+  id: number; wrestler_id: number; name: string
+  kind: 'trade' | 'walkout'
+  from_brand: string | null; to_brand: string | null
+  on_date: string; reason: string
+}
+
+export interface LockerRoom {
+  active: boolean
+  room: MoraleSnapshot[]
+  requests: WrestlerRequest[]
+  medical: MedicalReport
+  turns: TurnSuggestion[]
+  forced: ForcedMove[]
+  history: (WrestlerRequest & { resolved_on: string })[]
+  bands: { floor: number; label: string; note: string }[]
+  rock_bottom: number
+}
+
+export const fetchLockerRoom = (brand_id?: string) =>
+  req<LockerRoom>(`/api/locker-room${brand_id ? `?brand_id=${brand_id}` : ''}`)
+export const fetchMorale = (wid: number) => req<MoraleSnapshot>(`/api/morale/${wid}`)
+/** Say yes or no. `counter_value` part-grants a raise at a number you pick. */
+export const resolveRequest = (id: number, grant: boolean, counter_value?: number) =>
+  req<any>(`/api/requests/${id}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ grant, counter_value: counter_value ?? null }),
+  })
+export const generateRequests = () => req<any>('/api/requests/generate', { method: 'POST' })
+
+export const fetchMedical = (brand_id?: string) =>
+  req<MedicalReport>(`/api/medical${brand_id ? `?brand_id=${brand_id}` : ''}`)
+export const restWrestler = (wid: number, weeks: number) =>
+  req<any>(`/api/medical/${wid}/rest`, { method: 'POST', body: JSON.stringify({ weeks }) })
+export const clearRest = (wid: number) =>
+  req<any>(`/api/medical/${wid}/rest`, { method: 'DELETE' })
+
+export const fetchTurns = (status = 'pending') =>
+  req<TurnSuggestion[]>(`/api/turns?status=${status}`)
+export const scanTurns = () => req<any>('/api/turns/scan', { method: 'POST' })
+export const resolveTurn = (id: number, approve: boolean) =>
+  req<any>(`/api/turns/${id}/resolve`, { method: 'POST', body: JSON.stringify({ approve }) })
+
+// ================================================================ storylines
+
+export interface FeudBeat {
+  id: number; feud_id: number; on_date: string; show_id: number | null
+  kind: string; text: string; heat_after: number | null
+  winner_id: number | null; winner_name: string | null
+}
+export interface StorylineNext {
+  want: 'keep_apart' | 'talk' | 'physical' | 'blowoff'
+  segment: 'promo' | 'match'
+  advice: string
+  stage: string
+  protected: boolean
+  series: { a_wins: number; b_wins: number; draws: number; matches: number; leader: number | null }
+}
+export interface Storyline {
+  id: number; a_id: number; b_id: number; a_name: string; b_name: string
+  brand_id: string | null; heat: number; status: string; note: string | null
+  started_on: string | null
+  stage: string; stage_label: string; stage_note: string
+  planned_blowoff: string | null; blowoff_label: string | null
+  beats: FeudBeat[]
+  next: StorylineNext
+  series: StorylineNext['series']
+}
+export const fetchStorylines = (status = 'active') =>
+  req<Storyline[]>(`/api/storylines?status=${status}`)
+/** Point a feud at a date. The booker then WITHHOLDS the singles match. */
+export const planBlowoff = (fid: number, on_date: string | null, label?: string) =>
+  req<any>(`/api/storylines/${fid}/plan`, {
+    method: 'POST', body: JSON.stringify({ on_date, label: label ?? null }),
+  })
+
+// ================================================================= brand war
+
+export interface BrandWarBrand {
+  brand_id: string; name: string; colour: string
+  shows: number; avg_rating: number | null; best_rating: number | null
+  weeks_won: number; weeks_contested: number
+  ppv_count: number; avg_buyrate: number | null
+  best_show: { id: number; name: string; held_on: string; tv_rating: number } | null
+  fanbase: number
+}
+export interface BrandWeek {
+  week_of: string
+  brands: { brand_id: string; name: string; colour: string; tv_rating: number; viewers: number; show_id: number }[]
+  contested: boolean; winner: string | null; tied: boolean; margin: number | null
+}
+export interface BrandWar {
+  season_year: number
+  brands: BrandWarBrand[]
+  weeks: BrandWeek[]
+  ties: number
+  leader: string | null
+  summary: string
+}
+export const fetchBrandWar = (season?: number) =>
+  req<BrandWar>(`/api/brand-war${season ? `?season=${season}` : ''}`)
+
+// ============================================================ crowd reaction
+
+export interface CrowdSegment {
+  kind: 'match' | 'promo'; id: number; slot: number
+  promo_kind?: string
+  quality: number | null
+  reaction: string | null; reaction_score: number | null
+}
+export interface ShowCrowd {
+  segments: CrowdSegment[]
+  loudest: CrowdSegment | null
+  avg_reaction: number | null
+}
+export const fetchShowCrowd = (showId: number) =>
+  req<ShowCrowd>(`/api/shows/${showId}/crowd`)
+
+/** Reaction label → a colour, so the same word reads the same everywhere. */
+export const REACTION_COLOUR: Record<string, string> = {
+  hostile: '#f87171', flat: '#64748b', polite: '#94a3b8',
+  'into it': '#38bdf8', hot: 'var(--color-gold)',
+  'red hot': '#fb923c', nuclear: '#f472b6',
+}
+
+// =============================================================== extensions
+
+export interface ExtensionQuote {
+  asking: number; market: number; base: number
+  morale: number; retention_factor: number; stance: string
+  toughness: number
+  personality: string; personality_label: string
+  personality_desc: string; personality_effect: string
+}
+export const fetchExtensionQuote = (wrestler_id: number, kind = 'wrestler') =>
+  req<ExtensionQuote>(`/api/negotiate/extension-quote?wrestler_id=${wrestler_id}&kind=${kind}`)
+
+export interface ExtensionVerdict {
+  wrestler_id: number; verdict: 'accept' | 'counter' | 'offended' | 'walked'
+  mood: string; offer: number; counter: number | null
+  patience: number; years: number
+  personality: string; morale: number
+}
+export const extensionOffer = (
+  wrestler_id: number, salary: number, years: number,
+  perks: string[] = [], signing_bonus = 0,
+) =>
+  req<ExtensionVerdict>('/api/negotiate/extension-offer', {
+    method: 'POST',
+    body: JSON.stringify({ wrestler_id, salary, years, perks, signing_bonus }),
+  })

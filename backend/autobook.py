@@ -37,7 +37,9 @@ import sqlite3
 
 import game
 import matches as MT
+import medical
 import promos as PR
+import storylines
 
 # A show's shape. This is the format the game is played in — four matches and two
 # promos on television, six matches split evenly between the brands on a
@@ -84,7 +86,8 @@ def _pool(con: sqlite3.Connection, brand_id: str) -> list[dict]:
     for r in con.execute(
         """SELECT w.id, COALESCE(o.display_name, w.name) name, w.style,
                   COALESCE(s.momentum,50) momentum, COALESCE(s.morale,50) morale,
-                  COALESCE(s.fatigue,0) fatigue, s.injured_until, c.role
+                  COALESCE(s.fatigue,0) fatigue, s.injured_until,
+                  s.rested_until, c.role
              FROM contract c
              JOIN wrestler w ON w.id=c.wrestler_id
              LEFT JOIN attribute_override o ON o.wrestler_id=w.id
@@ -97,6 +100,10 @@ def _pool(con: sqlite3.Connection, brand_id: str) -> list[dict]:
             continue
         if r["injured_until"] and r["injured_until"] > today:
             continue
+        # Time off the GM granted is time off. Booking through it would make the
+        # grant meaningless and is exactly what she asked you not to do.
+        if r["rested_until"] and r["rested_until"] > today:
+            continue
         eff = game.effective_attributes(con, r["id"], ach.get(r["id"]))
         out.append({
             "id": r["id"], "name": r["name"], "brand_id": brand_id,
@@ -104,6 +111,7 @@ def _pool(con: sqlite3.Connection, brand_id: str) -> list[dict]:
             "alignment": eff.get("alignment") or "face",
             "fatigue": r["fatigue"], "momentum": r["momentum"],
             "style": r["style"],
+            "risk": medical.risk(con, r["id"], today)["level"],
         })
     return out
 
@@ -319,26 +327,63 @@ def _brand_card(con: sqlite3.Connection, brand_id: str, pool: list[dict], want: 
     used: set[int] = set()
     out: list[dict] = []
     notes: list[str] = []
+    protected_feuds: list[dict] = []
+    st = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
+    today = st["current_date"] if st else ""
 
     def take(wids: list[int]) -> None:
         used.update(wids)
 
     # ---- 1. rivalries ----------------------------------------------------
+    #
+    # A feud the GM has pointed at a pay-per-view is PROTECTED: the singles match
+    # is deliberately withheld until the date. Anyone can book the blow-off
+    # tonight — the skill is not booking it tonight, and a booker that always
+    # reached for the hottest pairing made that skill impossible to express.
     for f in _feuds_for(con, ids):
         if len(out) >= want:
             break
         a, b = f["a_id"], f["b_id"]
         if a in used or b in used:
             continue
+        if storylines.is_protected(con, f["id"], today):
+            protected_feuds.append(f)
+            continue
         stip = _stipulation_for(f["heat"], rng)
         out.append({"match_type": "singles", "teams": [[a], [b]], "title_id": None,
-                    "stipulation": stip, "_heat": f["heat"],
+                    "stipulation": stip, "_heat": f["heat"], "_feud_id": f["id"],
                     "why": (f"Blow-off — {by_id[a]['name']} and {by_id[b]['name']} are at "
                             f"{f['heat']} heat" if f["heat"] >= game.FEUD_BLOWOFF_HEAT
                             else f"Rivalry — {f['heat']} heat and building")})
         take([a, b])
         notes.append(f"{by_id[a]['name']} vs {by_id[b]['name']} — the hottest story on "
                      f"{brand_id} ({f['heat']} heat).")
+
+    # A protected pairing still needs to be ON the show — on OPPOSITE sides of a
+    # tag match, which keeps them in contact without settling anything. This is
+    # the single most useful thing the arc system does for the card.
+    for f in protected_feuds:
+        if len(out) >= want:
+            break
+        a, b = f["a_id"], f["b_id"]
+        if a in used or b in used:
+            continue
+        spare_now = [w for w in pool if w["id"] not in used
+                     and w["id"] not in (a, b) and _usable(w)]
+        if len(spare_now) < 2:
+            continue
+        spare_now.sort(key=_star_power, reverse=True)
+        p1, p2 = spare_now[0], spare_now[1]
+        label = f.get("blowoff_label") or f.get("planned_blowoff")
+        out.append({"match_type": "tag", "teams": [[a, p1["id"]], [b, p2["id"]]],
+                    "title_id": None, "stipulation": "normal",
+                    "_heat": f["heat"] * 0.5, "_feud_id": f["id"],
+                    "why": f"Tag match — keeps {by_id[a]['name']} and {by_id[b]['name']} "
+                           f"apart until {label}"})
+        take([a, b, p1["id"], p2["id"]])
+        notes.append(f"{by_id[a]['name']} and {by_id[b]['name']} are being built to "
+                     f"{label} — tagged instead of matched, so the blow-off is not "
+                     f"given away.")
 
     # ---- 2. a title on the biggest remaining match -----------------------
     for t in _titles_for(con, brand_id):
@@ -493,19 +538,30 @@ def _promo_card(con: sqlite3.Connection, brands: list[str], by_id: dict[int, dic
     ids = set(by_id)
     feuds = _feuds_for(con, ids)
 
-    # 1. Feuds NOT being blown off tonight — the ones that still need building.
+    # 1. Feuds that still need building — and the TYPE comes from the story's own
+    # next beat, so the segment the booker picks is the one the Rivalries screen
+    # is advising. One source of truth for "what should happen next" (see
+    # storylines.next_beat) rather than two that can drift apart.
+    st = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
+    today = st["current_date"] if st else ""
     for f in feuds:
         if len(out) >= want:
             break
         a, b = f["a_id"], f["b_id"]
-        both_booked = a in booked and b in booked
         heat = f["heat"]
-        if both_booked:
+        arc = dict(con.execute("SELECT * FROM feud WHERE id=?", (f["id"],)).fetchone())
+        nxt = storylines.next_beat(con, arc, today)
+        # A protected feud is exactly the one that most needs a promo: it is the
+        # only way to build it while the match is being withheld.
+        if a in booked and b in booked and not nxt["protected"]:
             continue
-        if heat >= game.FEUD_BLOWOFF_HEAT:
+        if nxt["want"] == "keep_apart":
+            kind = rng.choice(["contract_signing", "face_to_face", "run_in_beatdown"])
+            why = f"Building to {arc.get('blowoff_label') or arc.get('planned_blowoff')} — {nxt['want'].replace('_', ' ')}"
+        elif nxt["want"] == "blowoff":
             kind = rng.choice(["contract_signing", "face_to_face"])
             why = f"{heat} heat — sign the match and let them stare at each other"
-        elif heat >= 45:
+        elif nxt["want"] == "physical":
             kind = rng.choice(["face_to_face", "run_in_beatdown"])
             why = f"{heat} heat — turn it physical before the match"
         else:

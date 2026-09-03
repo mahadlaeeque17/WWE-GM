@@ -33,12 +33,21 @@ asks the AI to decide a match.
 | Path | |
 |---|---|
 | `backend/` | FastAPI app — sim, GM layer, rankings, AI endpoints |
+| `backend/morale.py` | How every wrestler feels, and why |
+| `backend/demands.py` | What she asks for, and what she does when refused |
+| `backend/storylines.py` | Feuds as stories: beats, stages, planned blow-offs |
+| `backend/turns.py` | Face/heel turns the crowd asks for, you approve |
+| `backend/crowd.py` | Segment reactions, and how the crowd took each woman |
+| `backend/brandwar.py` | TV ratings, buyrates, and who is winning |
+| `backend/medical.py` | Injury severity, relapse risk, deliberate rest |
 | `frontend/` | Vite + React UI |
 | `harvester/` | Roster construction and the attribute engine |
 | `data/gm2000.db` | The save: the seeded, hand-tuned roster |
 | `PLAN.md` | Design document — every rule and why it is that rule |
 | `DEPLOY.md` | Hosting — it runs free on Vercel, and how the save survives |
 | `harvester/NOTES.md` | Data quirks and traps. Read before trusting a number |
+| `test_shows.py` | The show format, match types and promos, end to end |
+| `test_locker.py` | Morale, requests, forced moves, storylines, the ratings war |
 
 ## The show format
 
@@ -81,6 +90,125 @@ toward the show rating at half the weight of a match.
 
 A woman on the injury shelf can still come out and talk, which is how a feud
 survives an injury instead of dying with it.
+
+## The locker room
+
+Every wrestler has an opinion about working here, and she will tell you.
+
+Morale used to move only as a side effect of a match. Now it **drifts each month**
+from standing conditions, and every one of them explains itself in words with the
+lever that fixes it:
+
+| | |
+|---|---|
+| **Pay** | Her salary against her market rate. The biggest single factor. |
+| **Booking** | Is she on television at all? And is she being run into the ground? |
+| **Spotlight** | Main events and title shots — whether she is going anywhere. |
+| **Results** | Losing constantly wears anybody down. |
+| **Promises** | The perks written into her deal, checked against what happened. |
+| **Stamina** | Worked flat out with no rest. |
+| **Storyline** | Does she have a rivalry, i.e. a reason to be there? |
+
+Her **personality** decides how the same slight feels: money-hungry feels an
+underpayment nearly twice as hard, ambitious shrugs at the money and cares about
+the spotlight, loyal absorbs almost anything, a prima donna amplifies everything.
+
+### She asks before she acts
+
+Wrestlers come to you wanting a **raise, a title shot, a push, time off, a
+storyline, a character change, a trade** or **their release**. Refuse or ignore
+one and she gets firmer — `asking` → `insisting` → `final warning` — and the
+final ask says in plain words what she will do instead. Escalation tracks *her
+patience*, not the topic, so changing the subject does not reset it.
+
+At **rock bottom morale (10)**, a wrestler whose final trade or release demand
+was refused **carries it out herself**: she forces a move to the other brand, or
+walks out of the company for nothing. By that point you have turned her down
+three times and been warned twice, which is what makes it fair rather than
+random.
+
+Granting is never free. A raise rewrites the contract and eats cap space (you can
+meet her part-way). Time off makes her genuinely unbookable. A title shot pins the
+contender ladder. A push is a promise that gets checked.
+
+Five new requests a month at most — an in-tray of eighteen is a wall, and a wall
+gets ignored. The rest wait their turn, urgent ones first.
+
+## Contracts are negotiated, including extensions
+
+Re-signing used to be a button that paid her asking price. Now salary, **length**
+and perks are all put to her together and she can accept, counter, be insulted, or
+walk away from the table.
+
+Her price comes from a **retention** position rather than a market one, which is
+where the drama is:
+
+- **happy** → re-signs about 16% *under* what it would cost to sign her cold
+- **neutral** → a small loyalty discount
+- **unhappy** → wants about 22% *over* market, because leaving is what she
+  actually wants
+
+Length is a real term: somebody young and rising charges to be locked down, a
+veteran takes less for the security. Floating a sensible offer costs nothing, but
+an insulting one burns her patience — and at zero she walks and sees out her deal.
+
+## Storylines
+
+A feud is a story, not a heat counter. Every match, promo, run-in and turn between
+two women is recorded as a **beat**, so the save knows she has beaten you twice
+and the booker can reason about what should happen next. Each rivalry has a
+**stage** — build → escalation → ready to blow off — that decides what kind of
+segment the pre-booker reaches for.
+
+The important part: **point a feud at a pay-per-view and the booker withholds the
+singles match.** It books promos, run-ins and tag matches that keep the two apart
+until the date instead. Anyone can book the blow-off tonight; the skill is not
+booking it tonight.
+
+## Face and heel turns
+
+Two things are measured about every segment, and keeping them apart is the whole
+design:
+
+- **Reaction** — how hot the segment was. Quality counts but does not dominate,
+  so a technically fine match nobody is invested in reads *flat*, and an ordinary
+  match between two stars in a blood feud reads *hot*.
+- **Pop** — how the crowd took one woman, booed to cheered. Not a measure of how
+  well she did: a heel being loudly booed is a heel doing her job.
+
+The interesting number is the **mismatch**. A heel so over the crowd cheers her
+anyway is the most famous thing in wrestling booking, and it is only detectable
+because those two are measured separately. Turns are also triggered by a
+**betrayal** (a face laying out another face in a run-in), a long **losing run**,
+or simply having **gone stale**.
+
+Nothing ever turns on its own — the engine files a suggestion with its evidence
+and waits for you, the same rule rating progression follows.
+
+## The ratings war
+
+Money is a constraint, not a score: you can bank a fortune running a terrible show
+in a small building. So every television night draws a **rating** and every
+pay-per-view sells a **buyrate**, built from the audience you already have, what
+you put on, who was on it, and the storylines going in — then anchored to last
+week, because an audience arrives and leaves gradually. One great show cannot
+triple it; a run of them will.
+
+When both brands have run the same number of shows, the higher rating **wins the
+week**. Weeks won is the season table. A week with only one brand in it is
+deliberately not a win — you cannot beat somebody who did not turn up.
+
+## Injuries and rest
+
+An injury has a **severity** (knock, strain, tear, break), a body part, an
+expected return, and a **relapse risk** that lingers after she is back — so
+rushing somebody back is a real gamble. Before you book anyone you can see how
+dangerous it is and why: *"stamina down to 14/100, just back from a tear, 39
+years old."*
+
+**Resting** somebody is a decision, not an accident: she recovers at over twice
+the rate of simply being left off the card, and she is unbookable while it lasts.
+Booking through time off you granted is refused.
 
 ## The rating system
 

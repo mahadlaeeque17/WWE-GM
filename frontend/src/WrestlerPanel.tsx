@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Gallery from './Gallery'
 import {
-  saveOverride, clearOverride, extendContract, releaseContract,
+  saveOverride, clearOverride, releaseContract,
   removeWrestler, aiPromo, imageUrl, renameWrestler, aiScouting,
   setTags, clearHoldout, PERSONALITIES, fetchPersonalities, addAccolade, removeAccolade,
   fetchAccoladeKinds, saveBio, ageLabel, money, moneyFull, prettyDate, CAT_MAX, OVERALL_MAX, ROLE_LABEL,
   type RosterRow, type BrandFinance, type EditableStat,
 } from './api'
 import { AlignChip } from './ui'
+import ExtensionPanel from './ExtensionPanel'
 import Pentagon, { valuesOf, labelsOf } from './Pentagon'
 import CareerHistory from './CareerHistory'
 import { usePhotos } from './prefs'
@@ -61,7 +62,6 @@ export default function WrestlerPanel({
     looks: r.looks, personal: r.personal, age: r.age,
   })
   const [draft, setDraft] = useState<Record<string, number | null>>(seed(row))
-  const [years, setYears] = useState(2)
   const [err, setErr] = useState<string | null>(null)
 
   // Re-seed the editor when a different wrestler is selected, otherwise the
@@ -119,12 +119,6 @@ export default function WrestlerPanel({
   const reset = useMutation({
     mutationFn: () => clearOverride(row.id),
     onSuccess: invalidate,
-    onError: (e: Error) => setErr(e.message),
-  })
-
-  const extend = useMutation({
-    mutationFn: () => extendContract(row.id, years),
-    onSuccess: () => { setErr(null); invalidate() },
     onError: (e: Error) => setErr(e.message),
   })
 
@@ -594,22 +588,11 @@ export default function WrestlerPanel({
               </p>
 
               {row.contract.years > 1 && row.contract.origin !== 'extension' ? (
-                <div className="flex items-center gap-2 mt-2">
-                  <select
-                    value={years}
-                    onChange={(e) => setYears(Number(e.target.value))}
-                    className="bg-canvas border border-edge rounded px-2 py-1 text-xs"
-                  >
-                    {[1, 2, 3, 4, 5].map((y) => <option key={y} value={y}>{y} yr</option>)}
-                  </select>
-                  <button
-                    onClick={() => extend.mutate()}
-                    disabled={extend.isPending}
-                    className="text-xs px-2.5 py-1 rounded border border-edge hover:border-gold/60 disabled:opacity-30"
-                  >
-                    Extend from {row.contract.end_year + 1}
-                  </button>
-                </div>
+                <ExtensionPanel
+                  wrestlerId={row.id} contract={row.contract} role={row.role}
+                  onSigned={() => { setErr(null); invalidate() }}
+                  onError={(m) => setErr(m || null)}
+                />
               ) : (
                 <p className="text-[11px] text-orange-400 mt-2">
                   {row.contract.origin === 'extension'

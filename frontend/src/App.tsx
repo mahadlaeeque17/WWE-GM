@@ -4,6 +4,7 @@ import {
   fetchRoster, fetchBrands, fetchHealth, newGame, scanImages, syncDrive,
   fetchImageStatus, fetchCalendar, advanceMonth, fetchLogos,
   fetchSettings, saveSettings, money, ageLabel, fetchStoreStatus,
+  fetchLockerRoom,
   CATEGORIES, type CategoryKey,
 } from './api'
 import { setSoundEnabled } from './sound'
@@ -26,6 +27,8 @@ import TitlesTab from './TitlesTab'
 import HomeTab from './HomeTab'
 import RankingsTab from './RankingsTab'
 import ProgressionTab from './ProgressionTab'
+import LockerRoomTab from './LockerRoomTab'
+import BrandWarTab from './BrandWarTab'
 
 
 type SortKey = 'overall' | 'value' | 'age' | 'name' | 'morale' | CategoryKey
@@ -184,12 +187,20 @@ export default function App() {
   const lastRow = Math.min(rows.length, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN)
   const visibleRows = rows.slice(firstRow, lastRow)
 
-  // What the rail should badge. Only the one count that is both actionable and
-  // free — it falls out of the roster we already have, so no extra request. A
-  // badge that costs a round trip to say "0" is not worth having.
+  // Open requests, so a final warning cannot sit unseen. This one DOES cost a
+  // round trip, unlike the ratings-to-set count below — earned because a
+  // request has a deadline and ignoring it costs more than refusing it.
+  const { data: locker } = useQuery({
+    queryKey: ['locker', undefined], queryFn: () => fetchLockerRoom(),
+  })
+
+  // What the rail should badge. `rate` falls out of the roster we already have,
+  // so it is free; a badge that costs a round trip to say "0" is not worth
+  // having, which is why nothing else here is counted speculatively.
   const navBadges = useMemo(() => ({
     rate: roster.filter((r) => !r.removed && !r.edited.personal).length || undefined,
-  }) as Partial<Record<Tab, number>>, [roster])
+    lockerroom: ((locker?.requests.length ?? 0) + (locker?.turns.length ?? 0)) || undefined,
+  }) as Partial<Record<Tab, number>>, [roster, locker])
 
   return (
     <div className="h-full flex flex-col">
@@ -576,6 +587,8 @@ export default function App() {
       {tab === 'progression' && <ProgressionTab roster={roster} />}
       {tab === 'league' && <BrandsTab roster={roster} />}
       {tab === 'shows' && <ShowsTab roster={roster} />}
+      {tab === 'lockerroom' && <LockerRoomTab />}
+      {tab === 'brandwar' && <BrandWarTab />}
       {tab === 'images' && <ImagesTab />}
 
       <footer className="border-t border-edge px-6 py-2 text-[11px] text-slate-600 shrink-0">

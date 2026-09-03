@@ -14,8 +14,8 @@
 import { useEffect, useState } from 'react'
 
 export type Tab =
-  | 'home' | 'roster' | 'rate' | 'draft' | 'freeagents'
-  | 'raw' | 'smackdown' | 'stables' | 'trades' | 'league'
+  | 'home' | 'roster' | 'rate' | 'draft' | 'freeagents' | 'lockerroom'
+  | 'raw' | 'smackdown' | 'stables' | 'trades' | 'league' | 'brandwar'
   | 'shows' | 'titles' | 'rankings' | 'progression' | 'images' | 'cards'
   | 'rivalries'
 
@@ -37,6 +37,8 @@ export const GROUPS: Group[] = [
     { key: 'cards', label: 'Cards', icon: '🂠', hint: "Every season's set of player cards" },
     { key: 'draft', label: 'Draft', icon: '⇩', hint: 'Build your brands' },
     { key: 'freeagents', label: 'Free Agents', icon: '✚', hint: 'Sign anyone unsigned' },
+    { key: 'lockerroom', label: 'Locker Room', icon: '🗣',
+      hint: 'Morale, requests, the medical room, and turns to approve' },
   ]},
   { title: 'Brands', items: [
     { key: 'raw', label: 'Raw', icon: '●', brand: 'RAW' },
@@ -44,6 +46,8 @@ export const GROUPS: Group[] = [
     { key: 'stables', label: 'Stables', icon: '⛓', hint: 'Tag teams and factions' },
     { key: 'trades', label: 'Trades', icon: '⇄' },
     { key: 'league', label: 'League', icon: '$', hint: 'Budgets, payroll, cap space' },
+    { key: 'brandwar', label: 'Ratings War', icon: '📺',
+      hint: 'TV ratings, buyrates, and who is winning the week' },
   ]},
   { title: 'Show night', items: [
     { key: 'shows', label: 'Shows', icon: '▶', hint: 'Book a card, run the Rumble' },

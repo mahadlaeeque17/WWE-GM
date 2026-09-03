@@ -19,6 +19,7 @@ import {
   fetchRivalries, fetchHeadToHead, fetchCardSeasons, prettyDate, type RosterRow,
 } from './api'
 import { Avatar } from './ui'
+import Storylines from './Storylines'
 
 export default function RivalriesTab({ roster }: { roster: RosterRow[] }) {
   const [season, setSeason] = useState<number | null>(null)
@@ -73,12 +74,16 @@ export default function RivalriesTab({ roster }: { roster: RosterRow[] }) {
       </div>
 
       <div className="flex-1 overflow-auto">
+        {/* The present tense first: feuds running now, and the blow-off planner.
+            The ranked list below is history. */}
+        <Storylines />
+
         {isLoading && <p className="p-6 text-sm text-slate-500">Reading the tape…</p>}
 
         {!isLoading && rivalries.length === 0 && (
           <p className="p-6 text-sm text-slate-500 max-w-[520px]">
-            No rivalries yet — two wrestlers have to have met in the ring for one
-            to exist. Book some shows and this fills itself in.
+            No completed rivalries yet — two wrestlers have to have met in the ring for one
+            to appear here. Book some shows and this fills itself in.
           </p>
         )}
 

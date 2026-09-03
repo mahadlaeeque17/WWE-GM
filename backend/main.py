@@ -24,15 +24,22 @@ import ai  # noqa: E402
 import attributes as A  # noqa: E402
 import autobook  # noqa: E402
 import booking  # noqa: E402
+import brandwar  # noqa: E402
 import cards  # noqa: E402
+import crowd  # noqa: E402
+import demands  # noqa: E402
 import game  # noqa: E402
 import history  # noqa: E402
 import images  # noqa: E402
 import negotiate  # noqa: E402
 import matches as MT  # noqa: E402
+import medical  # noqa: E402
 import migrate_cards  # noqa: E402
 import migrate_ratings  # noqa: E402
+import morale as morale_mod  # noqa: E402
 import promos as PR  # noqa: E402
+import storylines  # noqa: E402
+import turns  # noqa: E402
 import rankings  # noqa: E402
 import rumble  # noqa: E402
 import sim  # noqa: E402
@@ -844,14 +851,19 @@ def budgets() -> list[dict]:
 class ExtendBody(BaseModel):
     wrestler_id: int
     years: int = Field(2, ge=game.MIN_CONTRACT_YEARS, le=game.MAX_CONTRACT_YEARS)
+    # None means "pay whatever she asks". Any number is put to her, and she can
+    # counter or refuse — see negotiate.offer(context="extension").
     annual_value: int | None = None
+    perks: list[str] = []
+    signing_bonus: int = 0
 
 
 @app.post("/api/contracts/extend")
 def extend(body: ExtendBody) -> dict:
     c = conn()
     try:
-        return game.extend(c, body.wrestler_id, body.years, body.annual_value)
+        return game.extend(c, body.wrestler_id, body.years, body.annual_value,
+                           perks=body.perks, signing_bonus=body.signing_bonus)
     except game.SigningError as e:
         raise HTTPException(400, str(e))
     finally:
@@ -1366,9 +1378,10 @@ def show_detail(show_id: int) -> dict:
     c = conn()
     try:
         promo_list = PR.for_show(c, show_id)
+        reactions = crowd.show_reactions(c, show_id)
     finally:
         c.close()
-    return {**base[0], "matches": matches, "promos": promo_list}
+    return {**base[0], "matches": matches, "promos": promo_list, "crowd": reactions}
 
 
 @app.get("/api/titles")
@@ -2189,5 +2202,265 @@ def rating_resolve_all(approve: bool = Body(...), season: int | None = Body(None
     c = conn()
     try:
         return rankings.resolve_all(c, approve, season)
+    finally:
+        c.close()
+
+
+# ================================================================ locker room
+#
+# Everything about how the roster FEELS, and what it is asking for. Grouped as
+# one screen because the four things on it are one conversation: she is unhappy
+# for a reason, the reason has a fix, and she has come to ask for it.
+
+@app.get("/api/locker-room")
+def locker_room(brand_id: str | None = None) -> dict:
+    """Morale, open requests, the medical room and pending turns, in one call.
+
+    One endpoint rather than four because the screen is useless in pieces — the
+    request only makes sense next to the morale that caused it.
+    """
+    c = conn()
+    try:
+        if not current_state(c):
+            return {"active": False, "room": [], "requests": [], "medical": {},
+                    "turns": [], "forced": []}
+        return {
+            "active": True,
+            "room": morale_mod.locker_room(c, brand_id),
+            "requests": demands.open_requests(c, brand_id),
+            "medical": medical.report(c, brand_id),
+            "turns": turns.list_suggestions(c, "pending"),
+            "forced": demands.forced(c),
+            "history": demands.history(c, 30),
+            "bands": [{"floor": lo, "label": lab, "note": n}
+                      for lo, lab, n in morale_mod.BANDS],
+            "rock_bottom": morale_mod.ROCK_BOTTOM,
+        }
+    finally:
+        c.close()
+
+
+@app.get("/api/morale/{wid}")
+def morale_snapshot(wid: int) -> dict:
+    """One wrestler's mood and every standing condition acting on it."""
+    c = conn()
+    try:
+        return morale_mod.snapshot(c, wid)
+    except (ValueError, game.SigningError) as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+class ResolveRequestBody(BaseModel):
+    grant: bool
+    counter_value: int | None = None
+
+
+@app.post("/api/requests/{rid}/resolve")
+def resolve_request(rid: int, body: ResolveRequestBody) -> dict:
+    """Say yes or no. A raise can be met part-way with `counter_value`."""
+    c = conn()
+    try:
+        return demands.resolve(c, rid, body.grant, body.counter_value)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+@app.get("/api/requests")
+def list_requests(brand_id: str | None = None) -> list[dict]:
+    c = conn()
+    try:
+        return demands.open_requests(c, brand_id)
+    finally:
+        c.close()
+
+
+@app.post("/api/requests/generate")
+def generate_requests() -> dict:
+    """Ask the roster what it wants. Runs automatically each month too."""
+    c = conn()
+    try:
+        return demands.generate(c)
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------- medical
+
+@app.get("/api/medical")
+def medical_report(brand_id: str | None = None) -> dict:
+    c = conn()
+    try:
+        return medical.report(c, brand_id)
+    finally:
+        c.close()
+
+
+class RestBody(BaseModel):
+    weeks: int = 2
+
+
+@app.post("/api/medical/{wid}/rest")
+def rest_wrestler(wid: int, body: RestBody) -> dict:
+    """Stand her down deliberately. She recovers faster than being left off."""
+    c = conn()
+    try:
+        return medical.rest(c, wid, body.weeks)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+@app.delete("/api/medical/{wid}/rest")
+def unrest_wrestler(wid: int) -> dict:
+    """Call her back early. Costs a little goodwill — she was promised the time."""
+    c = conn()
+    try:
+        return medical.clear_rest(c, wid)
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------- turns
+
+@app.get("/api/turns")
+def list_turns(status: str = "pending") -> list[dict]:
+    c = conn()
+    try:
+        return turns.list_suggestions(c, status)
+    finally:
+        c.close()
+
+
+@app.post("/api/turns/scan")
+def scan_turns() -> dict:
+    c = conn()
+    try:
+        return turns.scan(c)
+    finally:
+        c.close()
+
+
+@app.post("/api/turns/{sid}/resolve")
+def resolve_turn(sid: int, approve: bool = Body(..., embed=True)) -> dict:
+    """Approve a turn (which writes the alignment) or reject it."""
+    c = conn()
+    try:
+        return turns.resolve(c, sid, approve)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------- storylines
+
+@app.get("/api/storylines")
+def list_storylines(status: str | None = "active") -> list[dict]:
+    """Every rivalry as a STORY: stage, beats, series score, what is next."""
+    c = conn()
+    try:
+        return storylines.arcs(c, status)
+    finally:
+        c.close()
+
+
+@app.get("/api/storylines/{fid}")
+def storyline_arc(fid: int) -> dict:
+    c = conn()
+    try:
+        return storylines.arc(c, fid)
+    except game.SigningError as e:
+        raise HTTPException(404, str(e))
+    finally:
+        c.close()
+
+
+class PlanBody(BaseModel):
+    on_date: str | None = None
+    label: str | None = None
+
+
+@app.post("/api/storylines/{fid}/plan")
+def plan_storyline(fid: int, body: PlanBody) -> dict:
+    """Point a feud at a date. The booker then WITHHOLDS the singles match."""
+    c = conn()
+    try:
+        return storylines.plan_blowoff(c, fid, body.on_date, body.label)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------- brand war
+
+@app.get("/api/brand-war")
+def brand_war(season: int | None = None) -> dict:
+    """The scoreboard: weeks won, average rating, buys, and who is ahead."""
+    c = conn()
+    try:
+        if not current_state(c):
+            return {"brands": [], "weeks": [], "summary": "No save."}
+        return brandwar.standings(c, season)
+    finally:
+        c.close()
+
+
+@app.get("/api/shows/{show_id}/crowd")
+def show_crowd(show_id: int) -> dict:
+    """Every segment's reaction, and the loudest moment of the night."""
+    c = conn()
+    try:
+        return crowd.show_reactions(c, show_id)
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------- extensions
+
+@app.get("/api/negotiate/extension-quote")
+def extension_quote_ep(wrestler_id: int, kind: str = "wrestler") -> dict:
+    """What re-signing her will cost, and why — her retention position.
+
+    Extensions used to be a button. This is the quote the negotiation screen
+    opens on: happy she re-signs at a discount, fed up she wants a premium.
+    """
+    c = conn()
+    try:
+        return negotiate.extension_quote(c, wrestler_id, kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+class ExtensionOfferBody(BaseModel):
+    wrestler_id: int
+    salary: int
+    years: int = 2
+    perks: list[str] = []
+    signing_bonus: int = 0
+
+
+@app.post("/api/negotiate/extension-offer")
+def extension_offer_ep(body: ExtensionOfferBody) -> dict:
+    """Evaluate an extension offer WITHOUT signing it — accept, counter, walk."""
+    c = conn()
+    try:
+        st = current_state(c)
+        if not st:
+            raise HTTPException(400, "no active save")
+        cur = game.active_contract(c, body.wrestler_id, st["season_year"])
+        if not cur:
+            raise HTTPException(400, "not under contract")
+        kind = "manager" if cur["role"] == "manager" else "wrestler"
+        return negotiate.offer(c, body.wrestler_id, cur["brand_id"], body.salary,
+                               perks=body.perks, kind=kind, context="extension",
+                               years=body.years, signing_bonus=body.signing_bonus)
     finally:
         c.close()

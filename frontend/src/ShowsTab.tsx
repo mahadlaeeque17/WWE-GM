@@ -5,6 +5,7 @@ import {
   aiCommentary, aiRecap, aiRivalBook, imageUrl, type RosterRow,
 } from './api'
 import { Stars } from './ui'
+import { REACTION_COLOUR } from './api'
 import RumblePanel from './RumblePanel'
 import CalendarView from './CalendarView'
 import BookingScreen from './BookingScreen'
@@ -198,6 +199,8 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
               <div className="text-[11px] text-slate-500">
                 {s.held_on} · {s.matches} matches
                 {s.promos ? ` · ${s.promos} promos` : ''}
+                {s.tv_rating != null ? ` · 📺 ${s.tv_rating.toFixed(2)}` : ''}
+                {s.buyrate != null ? ` · 💸 ${s.buyrate.toFixed(2)}` : ''}
                 {s.attendance ? ` · ${s.attendance.toLocaleString()} in` : ''}
               </div>
             </button>
@@ -276,8 +279,26 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
           {detail.rating?.toFixed(1)}
         </span>
       </div>
-      <p className="text-xs text-slate-500 mb-3">
-        {detail.held_on} · {detail.attendance?.toLocaleString()} in attendance
+      <p className="text-xs text-slate-500 mb-3 flex items-center gap-3 flex-wrap">
+        <span>{detail.held_on} · {detail.attendance?.toLocaleString()} in attendance</span>
+        {detail.tv_rating != null && (
+          <span className="text-slate-300">
+            📺 <span className="stat text-gold">{detail.tv_rating.toFixed(2)}</span> rating
+          </span>
+        )}
+        {detail.buyrate != null && (
+          <span className="text-slate-300">
+            💸 <span className="stat text-gold">{detail.buyrate.toFixed(2)}</span> buyrate
+          </span>
+        )}
+        {detail.crowd?.loudest && (
+          <span className="text-slate-400">
+            loudest: {detail.crowd.loudest.kind === 'promo' ? 'a promo' : `match ${detail.crowd.loudest.slot}`}
+            {' '}(<span style={{ color: REACTION_COLOUR[detail.crowd.loudest.reaction ?? ''] ?? '#94a3b8' }}>
+              {detail.crowd.loudest.reaction}
+            </span>)
+          </span>
+        )}
       </p>
 
       <button onClick={() => recapM.mutate()} disabled={recapM.isPending}
@@ -348,6 +369,7 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
                     {m.quality?.toFixed(1)}
                   </span>
                   <Stars quality={m.quality} size={12} />
+                  {m.reaction && <Reaction label={m.reaction} score={m.reaction_score} />}
                 </div>
               </div>
             </div>
@@ -388,6 +410,7 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
                       {p.quality?.toFixed(1)}
                     </span>
                     <Stars quality={p.quality} size={12} />
+                    {p.reaction && <Reaction label={p.reaction} score={p.reaction_score} />}
                   </div>
                 </div>
               </div>
@@ -399,6 +422,24 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * How the building took a segment.
+ *
+ * Deliberately shown NEXT TO the quality score rather than instead of it: the
+ * two say different things, and the gap between them is the lesson. A clean
+ * match between two women nobody is invested in reads high on quality and flat
+ * on reaction, and that is the most useful thing a show recap can tell you.
+ */
+function Reaction({ label, score }: { label: string; score: number | null }) {
+  const colour = REACTION_COLOUR[label] ?? '#94a3b8'
+  return (
+    <span className="label text-[8px] mt-0.5" style={{ color: colour }}
+      title={score != null ? `Crowd reaction ${score.toFixed(0)}/100` : undefined}>
+      {label}
+    </span>
   )
 }
 

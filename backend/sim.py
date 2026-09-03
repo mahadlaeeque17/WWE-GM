@@ -28,9 +28,13 @@ from datetime import date, datetime, timedelta
 
 import game
 import booking
+import brandwar
+import crowd
 import matches as MT
+import medical
 import promos as PR
 import rankings
+import storylines
 
 # How much each category contributes to in-ring match quality.
 #
@@ -189,6 +193,7 @@ def simulate_match(
     stipulation: str | None = None,
     prod_bonus: float = 0.0,
     match_type: str | None = None,
+    is_main: bool = False,
 ) -> dict:
     """Resolve one match. `teams` is a list of sides, each a list of wrestler ids.
 
@@ -342,13 +347,39 @@ def simulate_match(
     # on the body than a clean singles.
     risk = mt["fatigue"] * (1.0 + stip["quality"] * 0.05)
     injured = []
+    today = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()["current_date"]
     for wid in everyone:
         chance = BASE_INJURY_CHANCE * risk * (1 + state[wid]["fatigue"] / 120)
         age = attrs[wid].get("age")
         if age:
             chance *= 1 + max(0, age - 35) * 0.03
+        # A wrestler recently back from a bad injury is likelier to go down
+        # again — which is what makes rushing somebody back a real gamble.
+        chance *= medical.relapse_multiplier(con, wid, today)
         if rng.random() < chance:
-            injured.append({"wrestler_id": wid, "weeks": rng.randint(2, 10)})
+            weeks = rng.choices([rng.randint(1, 2), rng.randint(2, 4),
+                                 rng.randint(5, 9), rng.randint(10, 18)],
+                                weights=[46, 34, 15, 5])[0]
+            injured.append({"wrestler_id": wid, "weeks": weeks})
+
+    # --- the crowd ---------------------------------------------------------
+    # Two different measurements. REACTION is how hot the segment was; POP is
+    # how the building took each individual woman, which is a different question
+    # — a heel being loudly booed is a heel doing her job. See crowd.py.
+    react = crowd.segment_reaction(quality, heat, feud_heat, aligns, is_ppv, is_main)
+    cheap = finish in ("dq", "countout")
+    pops: dict[int, tuple[float, str]] = {}
+    for ti, t in enumerate(teams):
+        for wid in t:
+            al = attrs[wid].get("alignment") or "face"
+            pops[wid] = (crowd.wrestler_pop(
+                al, attrs[wid]["popularity"], state[wid]["momentum"], quality,
+                won=(not draw and ti == winner_idx),
+                beaten_clean=(fell_team is not None and ti == fell_team)
+                             or (fell_team is None and not draw and ti != winner_idx
+                                 and finish in ("pinfall", "submission")),
+                cheap_finish=cheap and not draw and ti == winner_idx,
+                feud_heat=feud_heat), al)
 
     return {
         "slot": slot,
@@ -371,17 +402,25 @@ def simulate_match(
         "fell_team": fell_team,
         "fatigue_cost": round(FATIGUE_PER_MATCH * mt["fatigue"]),
         "injured": injured,
+        "feud_heat": feud_heat,
+        "pops": pops,
+        **react,
     }
 
 
 def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict) -> int:
     cur = con.execute(
         "INSERT INTO sim_match (show_id, slot, title_id, quality, finish, stipulation, "
-        "match_type) VALUES (?,?,?,?,?,?,?)",
+        "match_type, reaction, reaction_score) VALUES (?,?,?,?,?,?,?,?,?)",
         (show_id, res["slot"], res["title_id"], res["quality"], res["finish"],
-         res.get("stipulation"), res.get("match_type")),
+         res.get("stipulation"), res.get("match_type"),
+         res.get("reaction"), res.get("reaction_score")),
     )
     match_id = cur.lastrowid
+    # How the building took each woman, which is a different question from how
+    # good the match was — and the input the turn system reads.
+    if res.get("pops"):
+        crowd.record_pops(con, "match", match_id, res["pops"])
 
     for ti, team in enumerate(res["teams"]):
         for wid in team:
@@ -438,14 +477,16 @@ def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict)
         )
 
     for inj in res["injured"]:
-        until = (date.fromisoformat(held_on) + timedelta(weeks=inj["weeks"])).isoformat()
-        con.execute("UPDATE wrestler_state SET injured_until=? WHERE wrestler_id=?",
-                    (until, inj["wrestler_id"]))
+        rec = medical.record_injury(con, inj["wrestler_id"], inj["weeks"], held_on)
+        inj.update(rec)
         game.log_event(con, "injury",
-                       f"{game._wname(con, inj['wrestler_id'])} is hurt — out about {inj['weeks']} weeks.",
+                       f"{game._wname(con, inj['wrestler_id'])} is hurt — "
+                       f"{rec['note']}, out about {inj['weeks']} weeks.",
                        icon="🩹")
 
-    # Rivalry heat: everyone who worked an opponent they're feuding with heats it up.
+    # Rivalry heat, and the BEAT that records what happened. The beat is what
+    # turns a feud from a heat counter into a story with a history — see
+    # storylines.py.
     bumped = set()
     for ti in range(len(res["teams"])):
         for tj in range(ti + 1, len(res["teams"])):
@@ -455,6 +496,27 @@ def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict)
                     if f and f["id"] not in bumped:
                         game.bump_feud_heat(con, f["id"], game.FEUD_HEAT_PER_MATCH)
                         bumped.add(f["id"])
+                        winner = None
+                        if res["winner_team"] == ti:
+                            winner = a
+                        elif res["winner_team"] == tj:
+                            winner = b
+                        mt_label = MT.get(res.get("match_type"))["label"]
+                        stip_key = res.get("stipulation")
+                        gimmick = (f" ({booking.stip(stip_key)['label']})"
+                                   if stip_key and stip_key != "normal" else "")
+                        if winner:
+                            txt = (f"{game._wname(con, winner)} beat "
+                                   f"{game._wname(con, b if winner == a else a)} "
+                                   f"via {res['finish']}{gimmick} — {res['quality']:.0f}/100")
+                        else:
+                            txt = (f"{game._wname(con, a)} and {game._wname(con, b)} "
+                                   f"went to a {res['finish']}{gimmick}")
+                        if mt_label != "Singles":
+                            txt += f" in a {mt_label}"
+                        storylines.add_beat(con, f["id"], held_on, "match", txt,
+                                            show_id=show_id, winner_id=winner)
+                        storylines.sync_stage(con, f["id"])
 
     # Title changes only on a clean finish — a DQ or countout keeps the belt.
     # For a manager belt the new holder is the winning side's MANAGER, resolved
@@ -586,12 +648,19 @@ def run_show(
 
     # Injury gates MATCHES only. A woman on the shelf can still come out and
     # talk, which is how a feud survives an injury instead of dying with it.
+    # Granted REST gates matches the same way: time off you promised her is not
+    # time off if you book her through it.
     for wid in booked:
-        s = con.execute("SELECT injured_until FROM wrestler_state WHERE wrestler_id=?",
-                        (wid,)).fetchone()
+        s = con.execute(
+            "SELECT injured_until, rested_until FROM wrestler_state WHERE wrestler_id=?",
+            (wid,)).fetchone()
         if s and s["injured_until"] and s["injured_until"] > held_on:
             nm = con.execute("SELECT name FROM wrestler WHERE id=?", (wid,)).fetchone()[0]
             raise ValueError(f"{nm} is injured until {s['injured_until']}")
+        if s and s["rested_until"] and s["rested_until"] > held_on:
+            nm = con.execute("SELECT name FROM wrestler WHERE id=?", (wid,)).fetchone()[0]
+            raise ValueError(f"{nm} is resting until {s['rested_until']} — you granted "
+                             f"her the time off. Cancel the rest first if you need her.")
 
     # Money gate for the booking screen: you can't spend past your budget.
     cost = booking.show_cost(card, logistics) if logistics is not None else 0
@@ -612,10 +681,12 @@ def run_show(
 
     results = []
     for slot, m in enumerate(card, start=1):
+        is_main = (slot == len(card))
         res = simulate_match(con, show_id, slot, m["teams"], seed, m.get("title_id"),
                              is_ppv=is_ppv, stipulation=m.get("stipulation"),
-                             prod_bonus=prod_bonus, match_type=m.get("match_type"))
-        res["is_main_event"] = (slot == len(card))
+                             prod_bonus=prod_bonus, match_type=m.get("match_type"),
+                             is_main=is_main)
+        res["is_main_event"] = is_main
         # Manager belt: the winning side's manager becomes/stays champion.
         if res.get("title_tier") == "manager" and m.get("managers") and res["winner_team"] is not None:
             mgrs = m["managers"]
@@ -708,11 +779,34 @@ def run_show(
         game.log_event(con, "ratings", f"Power 25 could not be rebuilt: {e}", icon="⚠️")
         con.commit()
 
+    # The scoreboard. Wrapped for the same reason: a rating is a nice-to-have on
+    # top of a show that has already happened, and must never lose one.
+    tv = None
+    try:
+        tv = brandwar.rate_show(con, show_id)
+    except Exception as e:                                   # noqa: BLE001
+        game.log_event(con, "ratings", f"TV rating could not be scored: {e}", icon="⚠️")
+        con.commit()
+    if tv and not is_ppv and tv.get("tv_rating") is not None:
+        prev = tv.get("previous")
+        arrow = "" if prev is None else (" ▲" if tv["tv_rating"] > prev
+                                         else " ▼" if tv["tv_rating"] < prev else " =")
+        game.log_event(con, "tv",
+                       f"{name} drew a {tv['tv_rating']} rating "
+                       f"({tv['viewers']:,} homes){arrow}", brand_id, "📺")
+        con.commit()
+    elif tv and is_ppv and tv.get("buyrate") is not None:
+        game.log_event(con, "tv",
+                       f"{name} did a {tv['buyrate']} buyrate "
+                       f"(~{tv['buys']:,} buys)", brand_id, "💸")
+        con.commit()
+
     return {
         "show_id": show_id, "name": name, "brand_id": brand_id, "held_on": held_on,
         "rating": round(show_rating, 1), "attendance": attendance, "city": city, "cost": cost,
         "is_ppv": is_ppv, "ppv_name": ppv_name, "matches": results,
-        "promos": promo_results, "ledger": ledger,
+        "promos": promo_results, "ledger": ledger, "tv": tv,
+        "crowd": crowd.show_reactions(con, show_id),
     }
 
 

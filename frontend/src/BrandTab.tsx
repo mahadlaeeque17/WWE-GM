@@ -40,11 +40,16 @@ export default function BrandTab({ brandId, roster }: { brandId: string; roster:
     onError: (e: Error) => { setMsg(null); setErr(e.message) },
   })
 
+  // The QUICK re-sign: no salary is sent, which the API reads as "pay whatever
+  // she asks" — so this always succeeds and always costs her full asking price.
+  // Haggling lives on her own panel (ExtensionPanel), where perks, a signing
+  // bonus and a lower number can be put to her and refused.
   const doExtend = useMutation({
     mutationFn: (id: number) => extendContract(id, extYears[id] ?? 2),
     onSuccess: (r) => {
       setErr(null)
-      setMsg(`Extended through ${r.end_year} at ${moneyFull(r.annual_value)}/yr.`)
+      setMsg(`Re-signed through ${r.end_year} at her asking price, ${moneyFull(r.annual_value)}/yr. `
+             + `Open her panel to negotiate instead.`)
       invalidate()
     },
     onError: (e: Error) => { setMsg(null); setErr(e.message) },
@@ -270,9 +275,10 @@ export default function BrandTab({ brandId, roster }: { brandId: string; roster:
                           <button
                             onClick={() => doExtend.mutate(r.id)}
                             disabled={doExtend.isPending}
+                            title="Re-sign at her full asking price. Open her panel to negotiate."
                             className="text-xs px-2 py-1 rounded border border-edge hover:border-gold/60 disabled:opacity-30"
                           >
-                            Extend
+                            Re-sign at ask
                           </button>
                         </>
                       ) : (

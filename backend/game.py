@@ -123,10 +123,94 @@ CREATE TABLE IF NOT EXISTS sim_promo_participant (
     seat        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (promo_id, wrestler_id)
 );
+-- One recorded moment in a rivalry: a match, a promo, a run-in, a turn. This is
+-- what makes a feud a STORY rather than a heat counter — "she has beaten me
+-- twice and I need the cage match" is only sayable if the beats are written down.
+CREATE TABLE IF NOT EXISTS feud_beat (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    feud_id    INTEGER NOT NULL REFERENCES feud(id),
+    on_date    TEXT NOT NULL,
+    show_id    INTEGER REFERENCES show(id),
+    kind       TEXT NOT NULL,       -- match | promo | run_in | turn | opened | settled
+    text       TEXT NOT NULL,
+    heat_after INTEGER,
+    winner_id  INTEGER REFERENCES wrestler(id)
+);
+-- A proposed face/heel turn. Never applied until the GM approves it — the same
+-- rule rating progression follows, for the same reason.
+CREATE TABLE IF NOT EXISTS turn_suggestion (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    wrestler_id INTEGER NOT NULL REFERENCES wrestler(id),
+    from_align  TEXT NOT NULL,
+    to_align    TEXT NOT NULL,
+    trigger     TEXT NOT NULL,      -- crowd | betrayal | frustration | stale
+    reason      TEXT NOT NULL,
+    evidence    TEXT,
+    score       REAL,
+    status      TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    created_on  TEXT NOT NULL,
+    resolved_on TEXT
+);
+-- How the crowd took ONE woman in ONE segment. -100 booed .. +100 cheered.
+-- The MISMATCH between this and her alignment is what generates a turn.
+CREATE TABLE IF NOT EXISTS segment_pop (
+    segment_kind TEXT NOT NULL,     -- match | promo
+    segment_id   INTEGER NOT NULL,
+    wrestler_id  INTEGER NOT NULL REFERENCES wrestler(id),
+    pop          REAL NOT NULL,
+    alignment    TEXT,
+    PRIMARY KEY (segment_kind, segment_id, wrestler_id)
+);
+-- A wrestler coming to the GM with something she wants. The whole point is that
+-- she asks BEFORE she acts, so a forced trade is never a surprise.
+CREATE TABLE IF NOT EXISTS wrestler_request (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    wrestler_id INTEGER NOT NULL REFERENCES wrestler(id),
+    brand_id    TEXT,
+    kind        TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'ask',      -- ask | firm | final
+    ask_value   INTEGER,                          -- money, weeks, a title id...
+    ask_target  INTEGER REFERENCES wrestler(id),  -- an opponent, a partner
+    reason      TEXT NOT NULL,
+    detail      TEXT,
+    status      TEXT NOT NULL DEFAULT 'open',     -- open | granted | denied | expired | forced
+    created_on  TEXT NOT NULL,
+    expires_on  TEXT,
+    resolved_on TEXT,
+    times_asked INTEGER NOT NULL DEFAULT 1
+);
+-- Something a wrestler did that the GM did not choose: a forced trade, a walkout.
+CREATE TABLE IF NOT EXISTS forced_move (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    wrestler_id INTEGER NOT NULL REFERENCES wrestler(id),
+    kind        TEXT NOT NULL,       -- trade | walkout
+    from_brand  TEXT,
+    to_brand    TEXT,
+    on_date     TEXT NOT NULL,
+    reason      TEXT NOT NULL
+);
+-- One brand's week of television, so the two can be compared. This is the
+-- scoreboard the save was missing: money accumulates, but nothing said who is
+-- WINNING.
+CREATE TABLE IF NOT EXISTS brand_week (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    week_of     TEXT NOT NULL,
+    season_year INTEGER NOT NULL,
+    brand_id    TEXT NOT NULL,
+    show_id     INTEGER REFERENCES show(id),
+    tv_rating   REAL,
+    viewers     INTEGER,
+    UNIQUE (week_of, brand_id)
+);
 CREATE INDEX IF NOT EXISTS idx_event_date ON event_log(on_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_feud_status ON feud(status);
 CREATE INDEX IF NOT EXISTS idx_promo_show ON sim_promo(show_id, slot);
 CREATE INDEX IF NOT EXISTS idx_promo_part ON sim_promo_participant(wrestler_id);
+CREATE INDEX IF NOT EXISTS idx_beat_feud ON feud_beat(feud_id, on_date);
+CREATE INDEX IF NOT EXISTS idx_request_open ON wrestler_request(status, wrestler_id);
+CREATE INDEX IF NOT EXISTS idx_turn_status ON turn_suggestion(status);
+CREATE INDEX IF NOT EXISTS idx_pop_wrestler ON segment_pop(wrestler_id);
+CREATE INDEX IF NOT EXISTS idx_brand_week ON brand_week(season_year, week_of);
 """
 
 
@@ -144,11 +228,44 @@ def ensure_schema(con: sqlite3.Connection) -> None:
     # before match types existed; readers infer the shape from the sides.
     if "match_type" not in mcols:
         con.execute("ALTER TABLE sim_match ADD COLUMN match_type TEXT")
+    # How the crowd took the segment, and the 0-100 number behind the label.
+    if "reaction" not in mcols:
+        con.execute("ALTER TABLE sim_match ADD COLUMN reaction TEXT")
+    if "reaction_score" not in mcols:
+        con.execute("ALTER TABLE sim_match ADD COLUMN reaction_score REAL")
+    pcols = _cols("sim_promo")
+    if pcols and "reaction" not in pcols:
+        con.execute("ALTER TABLE sim_promo ADD COLUMN reaction TEXT")
+    if pcols and "reaction_score" not in pcols:
+        con.execute("ALTER TABLE sim_promo ADD COLUMN reaction_score REAL")
     scols = _cols("show")
     if "city" not in scols:
         con.execute("ALTER TABLE show ADD COLUMN city TEXT")
     if "cost" not in scols:
         con.execute("ALTER TABLE show ADD COLUMN cost INTEGER")
+    # The scoreboard: what the show drew on television, and what a PPV sold.
+    if "tv_rating" not in scols:
+        con.execute("ALTER TABLE show ADD COLUMN tv_rating REAL")
+    if "buyrate" not in scols:
+        con.execute("ALTER TABLE show ADD COLUMN buyrate REAL")
+    # A feud is a STORY: what stage it is at, and when it is meant to pay off.
+    fcols = _cols("feud")
+    if "stage" not in fcols:
+        con.execute("ALTER TABLE feud ADD COLUMN stage TEXT")
+    if "planned_blowoff" not in fcols:
+        con.execute("ALTER TABLE feud ADD COLUMN planned_blowoff TEXT")
+    if "blowoff_label" not in fcols:
+        con.execute("ALTER TABLE feud ADD COLUMN blowoff_label TEXT")
+    wcols = _cols("wrestler_state")
+    # GM-granted time off. She is unbookable until this date and recovers fast —
+    # the difference between "worn down" and "resting" being a decision you made.
+    if "rested_until" not in wcols:
+        con.execute("ALTER TABLE wrestler_state ADD COLUMN rested_until TEXT")
+    # An injury you can plan around: how bad, and what it was.
+    if "injury_severity" not in wcols:
+        con.execute("ALTER TABLE wrestler_state ADD COLUMN injury_severity TEXT")
+    if "injury_note" not in wcols:
+        con.execute("ALTER TABLE wrestler_state ADD COLUMN injury_note TEXT")
     con.commit()
 
 
@@ -784,14 +901,16 @@ def _write_contract(con: sqlite3.Connection, wrestler_id: int, brand_id: str,
 
 
 def extend(con: sqlite3.Connection, wrestler_id: int, years: int,
-           annual_value: int | None = None) -> dict:
-    """Extend an existing deal, NBA-style.
+           annual_value: int | None = None, perks: list[str] | None = None,
+           signing_bonus: int = 0) -> dict:
+    """Extend an existing deal, NBA-style — and she has to agree to it.
 
     Rules, deliberately matching the brief:
       - only a wrestler already under contract can be extended
       - a ONE-YEAR contract cannot be extended at all
       - the extension begins the season after the current deal ends
       - the brand must fit the new money under the budget of that first season
+      - and she has to ACCEPT the offer (salary, perks and length together)
     """
     state = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
     if state is None:
@@ -818,10 +937,35 @@ def extend(con: sqlite3.Connection, wrestler_id: int, years: int,
     if already:
         raise SigningError("this contract has already been extended")
 
-    ask = asking_price(con, wrestler_id)
-    value = annual_value if annual_value is not None else ask
-    if value < ask:
-        raise SigningError(f"she will not extend below her asking price of ${ask:,}")
+    # An extension is a NEGOTIATION, not a button. It used to accept any number
+    # at or above a flat asking price, which made the one genuinely interesting
+    # decision — what keeping somebody is worth — into data entry, and meant
+    # morale had no consequence at the exact moment it should bite hardest.
+    #
+    # The offer is now evaluated by the same machinery that prices a free agent,
+    # against her RETENTION position: happy she re-signs at a discount, fed up
+    # she wants a premium to stay. `annual_value=None` means "pay whatever she
+    # asks", which keeps the old one-call path working for the AI and the tests.
+    import negotiate
+    kind = "manager" if current["role"] == "manager" else "wrestler"
+    quote = negotiate.extension_quote(con, wrestler_id, kind)
+    if annual_value is None:
+        value = quote["asking"]
+    else:
+        value = int(annual_value)
+        verdict = negotiate.offer(con, wrestler_id, current["brand_id"], value,
+                                  perks=perks or [], kind=kind, context="extension",
+                                  years=years, signing_bonus=signing_bonus)
+        if verdict["verdict"] not in ("accept",):
+            if verdict["verdict"] == "walked":
+                raise SigningError(
+                    f"She has walked away from the table. She will see out her deal "
+                    f"and you can try again next season.")
+            hint = verdict.get("counter")
+            raise SigningError(
+                f"She turned that down ({verdict['mood']})"
+                + (f" — she wants about ${hint:,}." if hint else ".")
+                + " Raise the offer, add perks, or change the length.")
 
     start = current["end_year"] + 1
     budget = ensure_budget(con, current["brand_id"], start)
@@ -838,11 +982,23 @@ def extend(con: sqlite3.Connection, wrestler_id: int, years: int,
         )
 
     cid = _write_contract(con, wrestler_id, current["brand_id"], value, years,
-                          start, state["current_date"], "extension", current["id"])
+                          start, state["current_date"], "extension", current["id"],
+                          perks=perks, signing_bonus=signing_bonus,
+                          role=current["role"])
+    # Re-signing is a vote of confidence and she feels it. Paying over her
+    # retention price feels better still — see negotiate.pay_position.
+    negotiate.reset(wrestler_id, current["brand_id"])
+    con.execute("UPDATE wrestler_state SET morale = MAX(0, MIN(100, morale + ?)) "
+                "WHERE wrestler_id=?", (8, wrestler_id))
+    log_event(con, "contract",
+              f"{_wname(con, wrestler_id)} re-signs with {current['brand_id']} — "
+              f"{years} year{'s' if years != 1 else ''} at ${value:,} from {start}.",
+              current["brand_id"], "✍️")
     con.commit()
     return {"contract_id": cid, "wrestler_id": wrestler_id,
             "brand_id": current["brand_id"], "annual_value": value,
-            "years": years, "start_year": start, "end_year": start + years - 1}
+            "years": years, "start_year": start, "end_year": start + years - 1,
+            "perks": perks or [], "signing_bonus": signing_bonus}
 
 
 FREE_AGENT_YEARS = 1
@@ -2308,7 +2464,12 @@ def calendar(con: sqlite3.Connection) -> dict:
         "shows": month_shows(seed, year, d.month),
         "snme_days": snme_days,
         "is_finale": d.month == 12,     # WrestleMania month ends the season
-        "schedule": [{"month": m, "month_name": MONTHS[m - 1], "name": PPV_SCHEDULE[m]}
+        # Each entry carries the DATE the show lands on, not just its name. The
+        # blow-off planner needs that date to point a feud at a pay-per-view, and
+        # having the UI recompute "last Sunday of the month" for itself meant two
+        # implementations of one rule that could quietly drift apart.
+        "schedule": [{"month": m, "month_name": MONTHS[m - 1], "name": PPV_SCHEDULE[m],
+                      "date": f"{year}-{m:02d}-{_last_sunday(year, m):02d}"}
                      for m in range(1, 13)],
     }
 
@@ -2425,13 +2586,60 @@ def advance_month(con: sqlite3.Connection) -> dict:
     if d.month == 12:
         return advance_season(con)
     nd = date(d.year, d.month + 1, 1)
+    days = (nd - d).days
     con.execute("UPDATE game_state SET current_date=? WHERE id=1", (nd.isoformat(),))
     con.commit()
     ai = ai_monthly(con)
     return {"season_year": st["season_year"], "date": nd.isoformat(),
             "month": nd.month, "month_name": MONTHS[nd.month - 1],
             "ppv": ppv_for_month(nd.month, st["season_year"]), "rolled_season": False,
-            "ai": ai}
+            "ai": ai, **monthly_tick(con, days)}
+
+
+def monthly_tick(con: sqlite3.Connection, days: int = 30) -> dict:
+    """Everything a month does to the roster that is not a show.
+
+    ORDER MATTERS HERE and it is the whole design of the locker room:
+
+      1. recovery      injuries heal, granted rest expires
+      2. morale drift  pay, booking, spotlight, promises all act
+      3. stale feuds   rivalries that were paid off or abandoned close
+      4. turns         the crowd's verdict is scanned for a turn worth proposing
+      5. expiry        requests the GM never answered lapse (and cost more than
+                       a straight refusal did)
+      6. FORCE         wrestlers at rock bottom who already asked at `final`
+                       severity act on it
+      7. generate      new requests are filed for the month ahead
+
+    Step 6 comes BEFORE step 7 on purpose. Forcing has to read the request she
+    filed LAST month, and generating first would replace it with a fresh `ask`
+    and quietly let her off — which would mean a demand could never actually be
+    carried out.
+
+    Every step is wrapped: a failure in one must not cost the calendar advance
+    that has already been committed.
+    """
+    import demands
+    import medical
+    import morale as morale_mod
+    import storylines
+    import turns
+
+    out: dict = {}
+    for key, fn in (
+        ("recovery", lambda: medical.tick_recovery(con, days)),
+        ("morale", lambda: morale_mod.apply_monthly_drift(con)),
+        ("feuds_settled", lambda: storylines.settle_stale(con)),
+        ("turns", lambda: turns.scan(con)),
+        ("requests_expired", lambda: demands.expire_stale(con)),
+        ("forced", lambda: demands.force_moves(con)),
+        ("requests", lambda: demands.generate(con)),
+    ):
+        try:
+            out[key] = fn()
+        except Exception as e:                               # noqa: BLE001
+            out[key] = {"error": str(e)}
+    return {"month_end": out}
 
 
 def advance_season(con: sqlite3.Connection) -> dict:
@@ -2503,7 +2711,11 @@ def advance_season(con: sqlite3.Connection) -> dict:
 
     con.commit()
     ai = ai_monthly(con)
+    # December rolls straight into advance_season, so the month-end work has to
+    # happen here too or the last month of every year would quietly skip it.
+    tick = monthly_tick(con, 31)
     return {"season_year": new_season, "contracts_expired": expired,
+            **tick,
             "date": new_date, "month": 1, "month_name": "January",
             "ppv": ppv_for_month(1, new_season), "rolled_season": True,
             "rolled_forward": len(leftovers),

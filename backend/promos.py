@@ -25,6 +25,7 @@ from __future__ import annotations
 import random
 import sqlite3
 
+import crowd
 import game
 
 SCHEMA = """
@@ -229,11 +230,29 @@ def simulate_promo(
         + rng.gauss(0, 5)
     quality = max(0.0, min(100.0, quality))
 
+    # A promo has a crowd reaction like a match does, and each woman in it gets
+    # her own read — a heel cutting a great promo SHOULD be booed harder, and
+    # the one who is cheered anyway is the one who wants turning.
+    react = crowd.segment_reaction(quality, base, feud_heat, aligns, is_ppv, False)
+    pops: dict[int, tuple[float, str]] = {}
+    for seat, wid in enumerate(ids):
+        al = attrs[wid].get("alignment") or "face"
+        pops[wid] = (crowd.wrestler_pop(
+            al, attrs[wid]["popularity"],
+            (state[wid]["momentum"] if state[wid] else 50),
+            quality,
+            # Holding the mic is the promo equivalent of winning: she controlled
+            # the segment. The victim of a beatdown is the one taking the fall.
+            won=(seat == 0 and kind != "in_ring_apology"),
+            beaten_clean=(kind == "run_in_beatdown" and seat > 0),
+            cheap_finish=False, feud_heat=feud_heat), al)
+
     return {
         "slot": slot, "kind": kind, "label": p["label"], "wrestler_ids": ids,
         "quality": round(quality, 1), "feud_id": feud["id"] if feud else None,
         "feud_heat": feud_heat, "topic": topic,
         "alignment_bonus": align_bonus, "is_promo": True,
+        "pops": pops, **react,
     }
 
 
@@ -241,11 +260,13 @@ def apply_promo(con: sqlite3.Connection, show_id: int, res: dict) -> int:
     """Commit one promo: the row, the participants, and everything it moved."""
     p = get(res["kind"])
     cur = con.execute(
-        "INSERT INTO sim_promo (show_id, slot, kind, quality, feud_id, topic) "
-        "VALUES (?,?,?,?,?,?)",
+        "INSERT INTO sim_promo (show_id, slot, kind, quality, feud_id, topic, "
+        "reaction, reaction_score) VALUES (?,?,?,?,?,?,?,?)",
         (show_id, res["slot"], res["kind"], res["quality"], res.get("feud_id"),
-         res.get("topic")))
+         res.get("topic"), res.get("reaction"), res.get("reaction_score")))
     promo_id = cur.lastrowid
+    if res.get("pops"):
+        crowd.record_pops(con, "promo", promo_id, res["pops"])
 
     ids = res["wrestler_ids"]
     for seat, wid in enumerate(ids):
@@ -269,6 +290,24 @@ def apply_promo(con: sqlite3.Connection, show_id: int, res: dict) -> int:
     if res.get("feud_id"):
         con.execute("UPDATE feud SET heat = MAX(0, MIN(100, heat + ?)) WHERE id=?",
                     (int(p["heat"] * lift), res["feud_id"]))
+        import storylines                                    # noqa: PLC0415 — cycle
+        st = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
+        on = st["current_date"] if st else None
+        who = " & ".join(game._wname(con, w) for w in ids)
+        storylines.add_beat(
+            con, res["feud_id"], on or "", "run_in" if res["kind"] == "run_in_beatdown"
+            else "promo",
+            f"{p['label']}: {who} — {res['quality']:.0f}/100",
+            show_id=show_id)
+        storylines.sync_stage(con, res["feud_id"])
+
+    # A run-in beatdown where a face lays out another face IS a heel turn. The
+    # booking already happened; turns.py only files the paperwork for approval.
+    if res["kind"] == "run_in_beatdown" and len(ids) >= 2:
+        import turns                                         # noqa: PLC0415 — cycle
+        turns.note_betrayal(con, ids[0], ids[1],
+                            f"Attacked {game._wname(con, ids[1])} from behind in a "
+                            f"run-in beatdown.")
 
     # A title presentation is the champion reminding everyone what the belt is.
     if p.get("prestige"):
