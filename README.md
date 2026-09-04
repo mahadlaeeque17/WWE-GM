@@ -40,6 +40,8 @@ asks the AI to decide a match.
 | `backend/crowd.py` | Segment reactions, and how the crowd took each woman |
 | `backend/brandwar.py` | TV ratings, buyrates, and who is winning |
 | `backend/medical.py` | Injury severity, relapse risk, deliberate rest |
+| `backend/ringside.py` | What a manager at ringside is worth to a match |
+| `backend/revise.py` | Overruling a result, and putting back what it paid out |
 | `frontend/` | Vite + React UI |
 | `harvester/` | Roster construction and the attribute engine |
 | `data/gm2000.db` | The save: the seeded, hand-tuned roster |
@@ -48,6 +50,7 @@ asks the AI to decide a match.
 | `harvester/NOTES.md` | Data quirks and traps. Read before trusting a number |
 | `test_shows.py` | The show format, match types and promos, end to end |
 | `test_locker.py` | Morale, requests, forced moves, storylines, the ratings war |
+| `test_control.py` | Result overrides, ringside managers, storyline kinds |
 
 ## The show format
 
@@ -209,6 +212,68 @@ years old."*
 **Resting** somebody is a decision, not an accident: she recovers at over twice
 the rate of simply being left off the card, and she is unbookable while it lasts.
 Booking through time off you granted is refused.
+
+## Results are yours to overrule
+
+Every match shows who won, who lost, how it finished, who was at ringside and a
+**star rating** out of five. And you can overrule any of it — the winner, the
+finish, the stars. The engine simulates, you decide; that is how ratings
+progression, turns and the pre-booked card already worked, and results were the
+last place it did not.
+
+An override puts back what the old result paid out: the win/loss records, the
+momentum swing, the championship if that match awarded one, and the storyline
+beat that said "she beat her via pinfall". Changing the stars re-scores the night
+and its TV rating with it. What it does *not* do is re-simulate later shows that
+were booked off the old outcome — the screen says so, and every override is kept
+on the record.
+
+## Managers actually do something
+
+A manager at ringside is not decoration. She does three separate things:
+
+| | |
+|---|---|
+| **Lifts her side** | Influence is "how much she elevates whoever she stands beside", so it feeds her side's strength — up to about +9%. Enough to tilt a close match, never enough to overturn a talent gap. |
+| **Lifts the match** | Mic work adds crowd investment, for *both* sides' seconds. A good manager opposite a good manager is a better match than neither. |
+| **Interferes** | The one place she changes the winner outright rather than nudging the odds. Rare, weighted heavily toward heels, and always reported — a stolen match never looks like a bug. |
+
+Add or remove one per side on **any** match, not just the Manager's
+Championship. She is not a participant: no fatigue, no injury risk, no win or
+loss on her record, and she can second a match on a night she also wrestles.
+
+Anyone the sim would refuse is refused *before* it runs — a manager who is in
+the match, seconding both sides, or who is not somebody who manages. A silent
+no-op would have you believing she was working.
+
+## Storylines are not all rivalries
+
+Four kinds, and the difference is mechanical rather than cosmetic:
+
+| | | |
+|---|---|---|
+| ⚔ **Rivalry** | *heat* | They want to fight. Build with promos, pay off with a match. |
+| ❤ **Romance** | *investment* | A couple on screen. Segments build it. |
+| 🤝 **Alliance** | *trust* | Same side. The booker puts them in a tag as **partners**. |
+| 🎓 **Mentorship** | *bond* | A veteran bringing somebody up. |
+
+Only a rivalry wants a match. Booking a couple against each other *breaks* the
+story, so the pre-booker will not do it — it books romances into segments and
+alliances into tag matches on the same side. Managers count: a romance between a
+manager and the woman she manages is one of the most useful things on the list.
+
+**Turning one sour is the payoff, not a failure.** A break-up, a betrayal or a
+student turning on her teacher converts a story the crowd is already invested in
+into a rivalry that starts *hot* — strictly better than opening a cold feud
+between the same two people. The new rivalry remembers what it used to be.
+
+## Auto-book is opt-in
+
+The card screen opens **empty**, in the format's shape — four match rows and two
+promo slots, six on a pay-per-view — and you fill it. Booking a card from
+scratch is the game, so the pre-booked suggestion is a button you press
+(*Pre-book it for me*) rather than something that has already happened to your
+card. The choice is remembered.
 
 ## Wrestler, manager, or both
 

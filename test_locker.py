@@ -1023,15 +1023,32 @@ head("an old save upgrades itself at boot")
 # the database the app opens can predate this whole feature set, and the very
 # first request would die on a missing column.
 old_db = Path(tempfile.gettempdir()) / "gm2000_prelocker.db"
-shutil.copy(SRC, old_db)          # the BUNDLED seed, deliberately un-migrated
+shutil.copy(SRC, old_db)
 oc = sqlite3.connect(old_db)
 oc.row_factory = sqlite3.Row
+# BUILD the old-schema fixture rather than assuming the shipped seed still is
+# one. The seed gets migrated the first time anything opens it — including a
+# throwaway inspection from a shell — so a test that relied on it being stale
+# would pass or fail depending on what had touched the file, which is not a
+# property of the code under test.
+oc.executescript("""
+DROP TABLE IF EXISTS wrestler_request;
+DROP TABLE IF EXISTS forced_move;
+DROP TABLE IF EXISTS turn_suggestion;
+DROP TABLE IF EXISTS segment_pop;
+DROP TABLE IF EXISTS feud_beat;
+DROP TABLE IF EXISTS brand_week;
+DROP TABLE IF EXISTS sim_match_second;
+DROP TABLE IF EXISTS match_revision;
+""")
+oc.commit()
 pre = {r[0] for r in oc.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 # Every table boot must be able to create. `sim_promo` is included because the
 # migration still has to handle it, but it is excluded from the "fixture lacks
 # it" check below — it predates this feature set and the shipped seed has it.
 NEW_TABLES = ("wrestler_request", "forced_move", "turn_suggestion", "segment_pop",
-              "feud_beat", "brand_week", "sim_promo")
+              "feud_beat", "brand_week", "sim_promo",
+              "sim_match_second", "match_revision")
 THIS_CHANGE = set(NEW_TABLES) - {"sim_promo"}
 check("the fixture really lacks the new tables",
       not (THIS_CHANGE & pre), str(sorted(THIS_CHANGE & pre)))

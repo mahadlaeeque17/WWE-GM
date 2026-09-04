@@ -5,7 +5,7 @@ import {
   aiCommentary, aiRecap, aiRivalBook, imageUrl, type RosterRow,
 } from './api'
 import { Stars } from './ui'
-import { REACTION_COLOUR } from './api'
+import { REACTION_COLOUR, reviseWinner, reviseStars, FINISHES } from './api'
 import RumblePanel from './RumblePanel'
 import CalendarView from './CalendarView'
 import BookingScreen from './BookingScreen'
@@ -351,7 +351,19 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
                       )
                     })}
                   </div>
-                  <div className="text-[11px] text-slate-500 mt-1">via {m.finish}</div>
+                  <div className="text-[11px] text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                    <span>via {m.finish}</span>
+                    {!!m.seconds?.length && (
+                      <span className="text-slate-400">
+                        ringside: {m.seconds.map((x: any) =>
+                          `${x.name}${x.note === 'interfered' ? ' (interfered!)' : ''}`).join(', ')}
+                      </span>
+                    )}
+                    {!!m.revisions?.length && (
+                      <span className="text-gold" title="You overruled this result">✎ overruled</span>
+                    )}
+                  </div>
+                  <Revise m={m} sides={sides} onDone={onNarrated} />
                   {m.narrative && (
                     <p className="text-[13px] text-slate-300 mt-2 leading-relaxed border-l-2 border-gold/40 pl-2.5">
                       {m.narrative}
@@ -422,6 +434,99 @@ function ShowDetail({ detail, onNarrated }: { detail: any; onNarrated: () => voi
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * Overruling a result — the GM's final say.
+ *
+ * WHY IT IS HERE AND NOT ON A SEPARATE SCREEN. The decision is "I disagree with
+ * this", and it is made while looking at the result. Putting it behind a
+ * different page would mean re-finding the match you had an opinion about.
+ *
+ * Collapsed by default, because most results stand. Opening it shows what the
+ * override will and will NOT reach back and fix, taken from the server so the
+ * warning cannot drift from the behaviour.
+ */
+function Revise({ m, sides, onDone }: { m: any; sides: any[]; onDone: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const winner = useMutation({
+    mutationFn: (v: { team: number | null; finish?: string }) =>
+      reviseWinner(m.id, v.team, v.finish),
+    onSuccess: () => { setErr(null); onDone() },
+    onError: (e: Error) => setErr(e.message),
+  })
+  const stars = useMutation({
+    mutationFn: (v: number) => reviseStars(m.id, v),
+    onSuccess: () => { setErr(null); onDone() },
+    onError: (e: Error) => setErr(e.message),
+  })
+  const busy = winner.isPending || stars.isPending
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)}
+        className="text-[10px] text-slate-600 hover:text-gold mt-1.5">
+        ✎ overrule this result
+      </button>
+    )
+  }
+  return (
+    <div className="mt-2 rounded border border-gold/30 bg-gold/5 p-2.5">
+      <div className="flex items-baseline justify-between gap-2 mb-1.5">
+        <span className="label text-[9px] text-gold">Your call</span>
+        <button onClick={() => setOpen(false)}
+          className="text-[10px] text-slate-500 hover:text-slate-300">close</button>
+      </div>
+
+      <div className="label text-[8px] text-slate-500 mb-1">Winner</div>
+      <div className="flex flex-wrap gap-1 mb-2">
+        {sides.map((side: any[], si: number) => {
+          const on = m.winner_team === si
+          return (
+            <button key={si} disabled={busy}
+              onClick={() => winner.mutate({ team: si })}
+              className={`text-[11px] px-2 py-1 rounded border disabled:opacity-40 ${
+                on ? 'border-emerald-400 text-emerald-300 bg-emerald-400/10'
+                  : 'border-edge text-slate-400 hover:text-slate-200'}`}>
+              {side.map((p: any) => p.name).join(' & ')}
+            </button>
+          )
+        })}
+        <button disabled={busy} onClick={() => winner.mutate({ team: null })}
+          className={`text-[11px] px-2 py-1 rounded border disabled:opacity-40 ${
+            m.winner_team === null ? 'border-slate-400 text-slate-200 bg-raised'
+              : 'border-edge text-slate-500 hover:text-slate-300'}`}>
+          Draw
+        </button>
+      </div>
+
+      <div className="label text-[8px] text-slate-500 mb-1">Finish</div>
+      <select value={m.finish ?? 'pinfall'} disabled={busy}
+        onChange={(e) => winner.mutate({ team: m.winner_team, finish: e.target.value })}
+        className="w-full bg-canvas border border-edge rounded px-2 py-1 text-[11px] mb-2">
+        {FINISHES.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+      </select>
+
+      <div className="label text-[8px] text-slate-500 mb-1">Star rating</div>
+      <div className="flex flex-wrap gap-1">
+        {[0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5].map((v) => (
+          <button key={v} disabled={busy} onClick={() => stars.mutate(v)}
+            className={`text-[10px] px-1.5 py-1 rounded border tnum disabled:opacity-40 ${
+              m.stars === v ? 'border-gold text-gold bg-gold/10'
+                : 'border-edge text-slate-500 hover:text-slate-200'}`}>
+            {v % 1 === 0 ? v : v}★
+          </button>
+        ))}
+      </div>
+
+      {err && <p className="text-[10px] text-blood mt-1.5">{err}</p>}
+      <p className="text-[9px] text-slate-600 mt-2 leading-snug">
+        Records, momentum, the belt and the storyline beat are all put back for this match.
+        Later shows already booked off the old result are not re-simulated.
+      </p>
+    </div>
   )
 }
 

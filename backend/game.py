@@ -202,6 +202,29 @@ CREATE TABLE IF NOT EXISTS brand_week (
     viewers     INTEGER,
     UNIQUE (week_of, brand_id)
 );
+-- A manager at ringside for one match, on one side. She is NOT a
+-- participant: no fatigue, no injury risk, no win or loss on her record.
+CREATE TABLE IF NOT EXISTS sim_match_second (
+    match_id    INTEGER NOT NULL REFERENCES sim_match(id),
+    wrestler_id INTEGER NOT NULL REFERENCES wrestler(id),
+    team        INTEGER NOT NULL,
+    quality     REAL,
+    note        TEXT,
+    PRIMARY KEY (match_id, wrestler_id)
+);
+-- Every time the GM overrules a simulated result. On the record on purpose:
+-- the final say is hers, and a save should be able to show where she used it.
+CREATE TABLE IF NOT EXISTS match_revision (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id  INTEGER NOT NULL REFERENCES sim_match(id),
+    on_date   TEXT NOT NULL,
+    field     TEXT NOT NULL,
+    from_value TEXT,
+    to_value  TEXT,
+    note      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_second_match ON sim_match_second(match_id);
+CREATE INDEX IF NOT EXISTS idx_revision_match ON match_revision(match_id);
 CREATE INDEX IF NOT EXISTS idx_event_date ON event_log(on_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_feud_status ON feud(status);
 CREATE INDEX IF NOT EXISTS idx_promo_show ON sim_promo(show_id, slot);
@@ -250,6 +273,17 @@ def ensure_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE show ADD COLUMN buyrate REAL")
     # A feud is a STORY: what stage it is at, and when it is meant to pay off.
     fcols = _cols("feud")
+    # WHAT KIND of story. A rivalry is not the only thing two people can be in,
+    # and the difference matters mechanically: booking a rivalry against itself
+    # builds it, booking a romance against itself breaks it. NULL reads as
+    # 'rivalry' so every storyline in an older save keeps behaving as it did.
+    if "kind" not in fcols:
+        con.execute("ALTER TABLE feud ADD COLUMN kind TEXT")
+    # Where it came from, when a romance or an alliance turns sour and becomes a
+    # rivalry. Keeping the lineage is what lets the new rivalry say "and the
+    # crowd remembers every match they won together".
+    if "was_kind" not in fcols:
+        con.execute("ALTER TABLE feud ADD COLUMN was_kind TEXT")
     if "stage" not in fcols:
         con.execute("ALTER TABLE feud ADD COLUMN stage TEXT")
     if "planned_blowoff" not in fcols:
@@ -1984,20 +2018,37 @@ def feud_between(con: sqlite3.Connection, a: int, b: int):
 
 
 def create_feud(con: sqlite3.Connection, a_id: int, b_id: int,
-                brand_id: str | None = None, note: str | None = None) -> dict:
+                brand_id: str | None = None, note: str | None = None,
+                kind: str | None = None) -> dict:
+    """Open a storyline between two people.
+
+    `kind` is rivalry | romance | alliance | mentorship — see storylines.KINDS.
+    Managers count: a romance between a manager and a wrestler is one of the
+    most useful things on the list, and nothing here restricts who can be in it.
+    """
+    import storylines                                        # noqa: PLC0415
+    kind = kind if kind in storylines.KINDS else storylines.DEFAULT_KIND
+    k = storylines.KINDS[kind]
     if a_id == b_id:
-        raise SigningError("a feud needs two different wrestlers")
+        raise SigningError("a storyline needs two different people")
     if feud_between(con, a_id, b_id):
-        raise SigningError("those two are already feuding")
+        raise SigningError("those two already have a storyline running")
     st = con.execute("SELECT game_state.current_date FROM game_state WHERE id=1").fetchone()
+    on = st["current_date"] if st else now_iso()[:10]
     cur = con.execute(
-        "INSERT INTO feud (a_id, b_id, brand_id, heat, status, note, started_on) "
-        "VALUES (?,?,?,?, 'active', ?, ?)",
-        (a_id, b_id, brand_id, 25, note, st["current_date"] if st else now_iso()[:10]))
-    log_event(con, "feud", f"{_wname(con, a_id)} and {_wname(con, b_id)} are now feuding.",
-              brand_id, "🔥")
+        "INSERT INTO feud (a_id, b_id, brand_id, heat, status, note, started_on, kind) "
+        "VALUES (?,?,?,?, 'active', ?, ?, ?)",
+        (a_id, b_id, brand_id, 25, note, on, kind))
+    verb = {"rivalry": "are now feuding", "romance": "are an item",
+            "alliance": "have joined forces",
+            "mentorship": "have a teacher-and-student thing going"}[kind]
+    log_event(con, "feud",
+              f"{_wname(con, a_id)} and {_wname(con, b_id)} {verb}.",
+              brand_id, k["icon"])
+    storylines.add_beat(con, cur.lastrowid, on, "opened",
+                        f"{k['label']} begins.")
     con.commit()
-    return {"id": cur.lastrowid}
+    return {"id": cur.lastrowid, "kind": kind}
 
 
 def bump_feud_heat(con: sqlite3.Connection, feud_id: int, delta: int) -> None:

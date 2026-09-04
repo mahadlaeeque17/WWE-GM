@@ -34,6 +34,84 @@ from datetime import date
 
 import game
 
+# ---------------------------------------------------------------- kinds
+#
+# A rivalry is not the only story two people can be in, and treating every
+# storyline as a feud meant the only tool the game had was "book them against
+# each other". These four cover what a wrestling show actually runs:
+#
+#   rivalry      they want to fight. Heat is animosity, the payoff is a match.
+#   romance      they are together. Heat is how invested the crowd is, the payoff
+#                is a moment — and the best payoff of all is it going WRONG.
+#   alliance     they are on the same side. The payoff is a tag match won
+#                together; the interesting ending is a betrayal.
+#   mentorship   a veteran and somebody coming up. The payoff is the student
+#                arriving, and the sour version is the student surpassing her.
+#
+# WANTS_MATCH is the load-bearing field. For a rivalry, booking the two against
+# each other builds the story. For a romance or an alliance it BREAKS it — which
+# is why the pre-booker has to know the difference, and why booking a couple
+# against each other is offered as a deliberate act (see `sour`) rather than
+# happening by accident.
+KINDS: dict[str, dict] = {
+    "rivalry": {
+        "label": "Rivalry", "icon": "⚔", "wants_match": True,
+        "heat_word": "heat",
+        "desc": "They want to fight. Build it with promos, pay it off with a match.",
+        "sours_to": None,
+    },
+    "romance": {
+        "label": "Romance", "icon": "❤", "wants_match": False,
+        "heat_word": "investment",
+        "desc": "A couple on screen. Promos and moments build it; a break-up is "
+                "the biggest payoff in wrestling.",
+        "sours_to": "rivalry",
+        "sour_label": "Break-up",
+        "sour_note": "The break-up turns it into a rivalry with the crowd already invested.",
+    },
+    "alliance": {
+        "label": "Alliance", "icon": "🤝", "wants_match": False,
+        "heat_word": "trust",
+        "desc": "Two on the same side. Win tag matches together; the ending is a "
+                "betrayal nobody saw coming.",
+        "sours_to": "rivalry",
+        "sour_label": "Betrayal",
+        "sour_note": "The betrayal turns it into a rivalry, and the crowd remembers "
+                     "every match they won together.",
+    },
+    "mentorship": {
+        "label": "Mentorship", "icon": "🎓", "wants_match": False,
+        "heat_word": "bond",
+        "desc": "A veteran bringing somebody up. The student's Wrestling grows "
+                "faster while it lasts.",
+        "sours_to": "rivalry",
+        "sour_label": "The student turns",
+        "sour_note": "She has outgrown her teacher. A rivalry with real history behind it.",
+    },
+}
+
+DEFAULT_KIND = "rivalry"
+
+# A mentorship measurably helps the student: her season Wrestling progression is
+# scaled by this while the bond holds. It is the only storyline kind with a
+# mechanical effect on a RATING, which is why it is a modest number and why the
+# progression reason line says it out loud.
+MENTOR_GROWTH_BONUS = 0.35
+
+
+def kind_of(row) -> str:
+    """The kind of one storyline row, defaulting for saves written before kinds."""
+    try:
+        k = row["kind"]
+    except (KeyError, IndexError, TypeError):
+        k = None
+    return k if k in KINDS else DEFAULT_KIND
+
+
+def wants_match(kind: str) -> bool:
+    return KINDS.get(kind, KINDS[DEFAULT_KIND])["wants_match"]
+
+
 # Heat thresholds for the three stages. The top one is game.FEUD_BLOWOFF_HEAT so
 # there is exactly one definition of "ready to pay off" in the codebase.
 STAGE_ESCALATION = 45
@@ -134,7 +212,14 @@ def next_beat(con: sqlite3.Connection, feud: dict, on_date: str) -> dict:
 
     Read by the pre-booker to choose a segment and shown verbatim in the UI, so
     the advice the GM reads is the advice the booker actually followed.
+
+    The KIND comes first, because it changes what "building it" even means. For a
+    rivalry the match is the payoff; for a romance, an alliance or a mentorship
+    the match is the thing that BREAKS it, so the advice never asks for one.
     """
+    kind = kind_of(feud)
+    if kind != "rivalry":
+        return _non_rivalry_beat(con, feud, kind)
     stage = stage_for(feud["heat"], feud["status"])
     protected = bool(feud.get("planned_blowoff")) and feud["planned_blowoff"] > on_date
     bts = beats(con, feud["id"])
@@ -174,6 +259,118 @@ def next_beat(con: sqlite3.Connection, feud: dict, on_date: str) -> dict:
             "stage": stage, "series": series, "protected": False}
 
 
+def _non_rivalry_beat(con: sqlite3.Connection, feud: dict, kind: str) -> dict:
+    """Advice for a story that is not about wanting to fight.
+
+    These share a shape: build with segments, and the interesting ending is the
+    one where it goes wrong. So the advice escalates toward the SOUR turn rather
+    than toward a match, and names it — the GM should be able to see the good
+    version of the ending coming.
+    """
+    k = KINDS[kind]
+    heat = feud["heat"]
+    bts = beats(con, feud["id"])
+    series = _series(bts, feud["a_id"], feud["b_id"])
+    a, b = game._wname(con, feud["a_id"]), game._wname(con, feud["b_id"])
+    common = {"stage": "build" if heat < STAGE_ESCALATION
+              else "escalation" if heat < game.FEUD_BLOWOFF_HEAT else "blowoff",
+              "series": series, "protected": False, "kind": kind}
+
+    if kind == "romance":
+        if heat >= game.FEUD_BLOWOFF_HEAT:
+            return {**common, "want": "sour", "segment": "promo",
+                    "advice": f"The crowd is fully invested at {heat}. This is the "
+                              f"moment to break them up — the rivalry that comes out "
+                              f"of it starts hot instead of cold."}
+        if heat >= STAGE_ESCALATION:
+            return {**common, "want": "talk", "segment": "promo",
+                    "advice": f"{heat} investment. Put them out there together — a "
+                              f"segment they share is worth more than either alone."}
+        return {**common, "want": "talk", "segment": "promo",
+                "advice": f"Early days. Backstage segments and a shared promo get "
+                          f"{a} and {b} over as a couple."}
+
+    if kind == "alliance":
+        if heat >= game.FEUD_BLOWOFF_HEAT:
+            return {**common, "want": "sour", "segment": "promo",
+                    "advice": f"They have banked enough trust at {heat} for a betrayal "
+                              f"to actually hurt. Turn one on the other."}
+        return {**common, "want": "team", "segment": "match",
+                "advice": f"Book {a} and {b} on the SAME side of a tag and let them "
+                          f"win. Every win together is credit you can spend on the "
+                          f"betrayal later."}
+
+    # mentorship
+    if heat >= game.FEUD_BLOWOFF_HEAT:
+        return {**common, "want": "sour", "segment": "promo",
+                "advice": f"The student has arrived. Turning her on her teacher now "
+                          f"is a rivalry with real history behind it."}
+    return {**common, "want": "team", "segment": "match",
+            "advice": f"Keep them together — a shared tag match, or {a} at ringside "
+                      f"for {b}. The bond is worth Wrestling growth to the student "
+                      f"while it lasts."}
+
+
+def student_of(con: sqlite3.Connection, wid: int) -> int | None:
+    """Her mentor, if a mentorship is running and she is the junior half.
+
+    The junior is whoever is YOUNGER — the storyline does not record which is
+    which, and age is the honest read rather than asking the GM to declare it.
+    """
+    for f in con.execute(
+        """SELECT * FROM feud WHERE status='active'
+            AND (a_id=? OR b_id=?)""", (wid, wid)):
+        if kind_of(f) != "mentorship":
+            continue
+        other = f["b_id"] if f["a_id"] == wid else f["a_id"]
+        try:
+            me = game.effective_attributes(con, wid).get("age") or 30
+            them = game.effective_attributes(con, other).get("age") or 30
+        except ValueError:
+            continue
+        if me < them:
+            return other
+    return None
+
+
+def sour(con: sqlite3.Connection, feud_id: int, note: str | None = None) -> dict:
+    """Turn a romance, alliance or mentorship into a rivalry.
+
+    THIS IS THE PAYOFF, not a failure state. A break-up or a betrayal converts a
+    story the crowd is already invested in into a feud that starts hot, which is
+    strictly better than opening a cold rivalry between the same two people —
+    and it is the single most valuable thing the non-rivalry kinds are for.
+
+    The heat carries over (that investment is the whole point) and the previous
+    kind is remembered in `was_kind`, so the new rivalry can say where it came
+    from.
+    """
+    f = con.execute("SELECT * FROM feud WHERE id=?", (feud_id,)).fetchone()
+    if not f:
+        raise game.SigningError("no such storyline")
+    kind = kind_of(f)
+    k = KINDS[kind]
+    if not k.get("sours_to"):
+        raise game.SigningError("a rivalry has nowhere to turn — settle it instead.")
+    st = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
+    on = st["current_date"] if st else game.now_iso()[:10]
+    # A turn is a shock: it adds heat on top of what was already banked.
+    new_heat = min(100, (f["heat"] or 25) + 18)
+    con.execute(
+        "UPDATE feud SET kind=?, was_kind=?, heat=?, planned_blowoff=NULL, "
+        "blowoff_label=NULL WHERE id=?",
+        (k["sours_to"], kind, new_heat, feud_id))
+    a, b = game._wname(con, f["a_id"]), game._wname(con, f["b_id"])
+    add_beat(con, feud_id, on, "turn",
+             note or f"{k['sour_label']} — {a} and {b} are done. {k['sour_note']}")
+    sync_stage(con, feud_id)
+    game.log_event(con, "feud", f"{k['sour_label']}: {a} and {b}. It is a rivalry now.",
+                   f["brand_id"], "💔" if kind == "romance" else "🗡")
+    con.commit()
+    return {"feud_id": feud_id, "kind": k["sours_to"], "was_kind": kind,
+            "heat": new_heat}
+
+
 def arc(con: sqlite3.Connection, feud_id: int) -> dict:
     """One rivalry's whole story — for the Rivalries screen."""
     f = con.execute("SELECT * FROM feud WHERE id=?", (feud_id,)).fetchone()
@@ -184,9 +381,24 @@ def arc(con: sqlite3.Connection, feud_id: int) -> dict:
     d = dict(f)
     d["a_name"] = game._wname(con, f["a_id"])
     d["b_name"] = game._wname(con, f["b_id"])
+    kind = kind_of(f)
+    k = KINDS[kind]
+    d["kind"] = kind
+    d["kind_label"] = k["label"]
+    d["kind_icon"] = k["icon"]
+    d["kind_desc"] = k["desc"]
+    d["heat_word"] = k["heat_word"]
+    d["wants_match"] = k["wants_match"]
+    d["sours_to"] = k.get("sours_to")
+    d["sour_label"] = k.get("sour_label")
     stage = stage_for(f["heat"], f["status"])
     d["stage"] = stage
     d["stage_label"], d["stage_note"] = STAGES[stage]
+    # A non-rivalry has no "blow-off" to be ready for; its stage label should
+    # describe what it actually is.
+    if kind != "rivalry":
+        d["stage_label"] = k["label"]
+        d["stage_note"] = k["desc"]
     d["beats"] = beats(con, feud_id)
     d["next"] = next_beat(con, d, today)
     d["series"] = d["next"]["series"]
@@ -215,6 +427,12 @@ def settle_stale(con: sqlite3.Connection) -> list[dict]:
     for f in con.execute("SELECT * FROM feud WHERE status='active'"):
         bts = beats(con, f["id"])
         if not bts:
+            continue
+        # A romance or an alliance is a STANDING relationship, not a story
+        # heading for a finish. Closing one for being quiet would keep quietly
+        # dissolving couples the GM never broke up — they end when she sours
+        # them or settles them, and not otherwise.
+        if kind_of(f) != "rivalry":
             continue
         last = date.fromisoformat(bts[-1]["on_date"])
         quiet_days = (today - last).days

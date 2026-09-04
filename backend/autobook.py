@@ -140,11 +140,19 @@ def _usable(w: dict, desperate: bool = False) -> bool:
 
 # ---------------------------------------------------------------- ingredients
 
-def _feuds_for(con: sqlite3.Connection, ids: set[int]) -> list[dict]:
-    """Active rivalries where BOTH women are available tonight, hottest first."""
+def _feuds_for(con: sqlite3.Connection, ids: set[int],
+               kinds: tuple[str, ...] = ("rivalry",)) -> list[dict]:
+    """Active storylines where BOTH people are available tonight, hottest first.
+
+    KIND-FILTERED, and defaulting to rivalries only. This is the whole reason
+    the filter exists: booking two rivals against each other builds the story,
+    and booking a couple against each other DESTROYS it. Without the filter the
+    booker cheerfully put a hot romance in a singles match, which is the
+    opposite of the advice the Rivalries screen was giving for the same pairing.
+    """
     out = []
     for f in game.list_feuds(con, "active"):
-        if f["a_id"] in ids and f["b_id"] in ids:
+        if f["a_id"] in ids and f["b_id"] in ids and storylines.kind_of(f) in kinds:
             out.append(f)
     return sorted(out, key=lambda f: -f["heat"])
 
@@ -391,6 +399,35 @@ def _brand_card(con: sqlite3.Connection, brand_id: str, pool: list[dict], want: 
                      f"{label} — tagged instead of matched, so the blow-off is not "
                      f"given away.")
 
+    # ---- 1b. alliances go on the SAME side ------------------------------
+    #
+    # An alliance's payoff is winning together, so the booker puts the pair in a
+    # tag match as partners. This is the mirror image of the rivalry step above
+    # and it is why `_feuds_for` is kind-filtered: the same two names mean
+    # "book them against each other" or "book them with each other" depending
+    # entirely on what kind of story they are in.
+    for f in _feuds_for(con, ids - used, kinds=("alliance", "mentorship")):
+        if len(out) >= want:
+            break
+        a, b = f["a_id"], f["b_id"]
+        if a in used or b in used:
+            continue
+        opp = [w for w in pool if w["id"] not in used
+               and w["id"] not in (a, b) and _usable(w)]
+        if len(opp) < 2:
+            continue
+        opp.sort(key=_star_power, reverse=True)
+        kind_label = storylines.KINDS[storylines.kind_of(f)]["label"].lower()
+        out.append({"match_type": "tag",
+                    "teams": [[a, b], [opp[0]["id"], opp[1]["id"]]],
+                    "title_id": None, "stipulation": "normal",
+                    "_heat": f["heat"] * 0.4, "_feud_id": f["id"],
+                    "why": f"Tag match — {by_id[a]['name']} and {by_id[b]['name']} "
+                           f"team up ({kind_label})"})
+        take([a, b, opp[0]["id"], opp[1]["id"]])
+        notes.append(f"{by_id[a]['name']} and {by_id[b]['name']} work as partners — "
+                     f"every win together is credit to spend on the fallout later.")
+
     # ---- 2. a title on the biggest remaining match -----------------------
     for t in _titles_for(con, brand_id):
         if len(out) >= want:
@@ -542,7 +579,10 @@ def _promo_card(con: sqlite3.Connection, brands: list[str], by_id: dict[int, dic
         return True
 
     ids = set(by_id)
-    feuds = _feuds_for(con, ids)
+    # EVERY kind here, not just rivalries. A romance is built almost entirely in
+    # segments — it is the kind that needs the promo slot most, and the one the
+    # match half of the card deliberately will not touch.
+    feuds = _feuds_for(con, ids, kinds=tuple(storylines.KINDS))
 
     # 1. Feuds that still need building — and the TYPE comes from the story's own
     # next beat, so the segment the booker picks is the one the Rivalries screen
@@ -561,7 +601,16 @@ def _promo_card(con: sqlite3.Connection, brands: list[str], by_id: dict[int, dic
         # only way to build it while the match is being withheld.
         if a in booked and b in booked and not nxt["protected"]:
             continue
-        if nxt["want"] == "keep_apart":
+        if nxt["want"] == "sour":
+            # The story is ready to turn. A face-to-face or a run-in is where a
+            # break-up or a betrayal actually happens.
+            kind = ("run_in_beatdown" if storylines.kind_of(arc) != "romance"
+                    else "face_to_face")
+            why = nxt["advice"]
+        elif nxt["want"] == "talk" and storylines.kind_of(arc) != "rivalry":
+            kind = rng.choice(["backstage_interview", "face_to_face"])
+            why = nxt["advice"]
+        elif nxt["want"] == "keep_apart":
             kind = rng.choice(["contract_signing", "face_to_face", "run_in_beatdown"])
             why = f"Building to {arc.get('blowoff_label') or arc.get('planned_blowoff')} — {nxt['want'].replace('_', ' ')}"
         elif nxt["want"] == "blowoff":

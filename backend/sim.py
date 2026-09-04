@@ -34,6 +34,7 @@ import matches as MT
 import medical
 import promos as PR
 import rankings
+import ringside
 import storylines
 
 # How much each category contributes to in-ring match quality.
@@ -194,6 +195,7 @@ def simulate_match(
     prod_bonus: float = 0.0,
     match_type: str | None = None,
     is_main: bool = False,
+    seconds: list[int | None] | None = None,
 ) -> dict:
     """Resolve one match. `teams` is a list of sides, each a list of wrestler ids.
 
@@ -214,6 +216,13 @@ def simulate_match(
     rng = _rng(seed, show_id, slot)
     everyone = [w for t in teams for w in t]
     attrs = participants_attrs(con, everyone)
+    # Managers at ringside, one per side. Not participants — see ringside.py.
+    ach_all = game.achievement_inputs(con)
+    secs = ringside.resolve(
+        con, (seconds or [None] * len(teams))[:len(teams)],
+        lambda mid: game.effective_attributes(con, mid, ach_all.get(mid)))
+    while len(secs) < len(teams):
+        secs.append(None)
 
     state = {
         wid: con.execute("SELECT * FROM wrestler_state WHERE wrestler_id=?", (wid,)).fetchone()
@@ -250,6 +259,12 @@ def simulate_match(
         # stronger, a demoralised one (0) ~8% weaker. It can swing a close match
         # but never overturns a real talent gap.
         s = s * (0.85 + momentum / 333) * (1 - fatigue / 400) * (0.92 + morale / 625)
+        # Her manager's Influence is literally "how much she elevates whoever she
+        # stands beside", so it belongs here — a modest multiplier that tilts a
+        # close match and never overturns a talent gap. See ringside.py.
+        sec = secs[len(team_strength)]
+        if sec:
+            s *= sec["strength_mult"]
         team_strength.append(max(1.0, s))
 
     # --- outcome -----------------------------------------------------------
@@ -266,11 +281,32 @@ def simulate_match(
             winner_idx = i
             break
 
+    # --- interference ------------------------------------------------------
+    # The one place a second changes the WINNER outright rather than nudging the
+    # odds. Rolled AFTER the honest result so the log can say the match was
+    # stolen, and only ever in favour of her own side.
+    interfered = None
+    stolen_from = None
+    for ti, sec in enumerate(secs):
+        if not sec or ti == winner_idx:
+            continue
+        if rng.random() < sec["interfere_chance"]:
+            interfered = sec["wrestler_id"]
+            stolen_from = winner_idx
+            winner_idx = ti
+            break
+
     stip = booking.stip(stipulation)
     mt = MT.get(match_type)
     # A three-or-more-corner match almost never ends in a draw — somebody always
     # steals the pin, which is the whole appeal of the shape.
     draw = rng.random() < (0.015 if len(teams) > 2 else 0.04)
+    if draw:
+        # Nobody steals a draw. The roll above already happened (it has to, to
+        # keep the RNG stream stable), so the outcome is discarded rather than
+        # skipped — re-ordering the rolls would change every existing result.
+        interfered = None
+        stolen_from = None
     if stip["no_dq"]:
         # No-DQ stipulations can't end on a DQ or countout — it's anything goes.
         finish = "draw" if draw else rng.choices(["pinfall", "submission"], weights=[75, 25])[0]
@@ -316,6 +352,13 @@ def simulate_match(
     if feud_heat:
         feud_bonus = feud_heat * 0.10 + (5 if feud_heat >= game.FEUD_BLOWOFF_HEAT else 0)
 
+    # Every second in the match adds crowd investment, whichever side she is on:
+    # a good manager opposite a good manager is a better match than neither.
+    ringside_quality = sum(x["quality"] for x in secs if x)
+    heat += sum(x["heat"] for x in secs if x)
+    if interfered:
+        ringside_quality += ringside.INTERFERE_QUALITY
+
     variance = rng.gauss(0, 6)
     slot_bonus = min(6, slot * 0.8)          # later on the card means more time
     # A title match is worth more the more the belt means, and a prestigious
@@ -330,7 +373,8 @@ def simulate_match(
     quality = _clamp(base * 0.78 + heat * 0.18 + variance + slot_bonus
                      + title_bonus + chemistry + morale_bonus
                      + alignment_bonus + ppv_bonus + dq_penalty + feud_bonus
-                     + stip["quality"] + prod_bonus + mt["quality"])
+                     + stip["quality"] + prod_bonus + mt["quality"]
+                     + ringside_quality)
 
     # --- who took the fall -------------------------------------------------
     # In a multi-corner match only ONE woman is actually beaten, and protecting
@@ -404,6 +448,16 @@ def simulate_match(
         "injured": injured,
         "feud_heat": feud_heat,
         "pops": pops,
+        "seconds": [None if not x else
+                    {"wrestler_id": x["wrestler_id"], "name": x["name"],
+                     "team": i, "quality": round(x["quality"], 1),
+                     "lift": round((x["strength_mult"] - 1) * 100, 1)}
+                    for i, x in enumerate(secs)],
+        "interfered_by": interfered,
+        "interference_note": (
+            f"{game._wname(con, interfered)} got involved and stole it."
+            if interfered else None),
+        "stolen_from_team": stolen_from,
         **react,
     }
 
@@ -421,6 +475,15 @@ def _apply_match(con: sqlite3.Connection, show_id: int, held_on: str, res: dict)
     # good the match was — and the input the turn system reads.
     if res.get("pops"):
         crowd.record_pops(con, "match", match_id, res["pops"])
+    if res.get("seconds"):
+        ringside.record(
+            con, match_id,
+            [None if not x else {"wrestler_id": x["wrestler_id"],
+                                 "quality": x["quality"]}
+             for x in res["seconds"]],
+            res.get("interfered_by"))
+    if res.get("interference_note"):
+        game.log_event(con, "interference", res["interference_note"], icon="🫱")
 
     for ti, team in enumerate(res["teams"]):
         for wid in team:
@@ -618,6 +681,18 @@ def run_show(
     if len(booked) != len(set(booked)):
         raise ValueError("a wrestler is booked in more than one match on this card")
 
+    # Ringside assignments are checked before anything is simulated, so a
+    # manager who could not actually second the match never silently does
+    # nothing — a silent no-op would have the GM believing she was working.
+    for i, m in enumerate(card, start=1):
+        secs = m.get("seconds") or m.get("managers")
+        if not secs:
+            continue
+        try:
+            ringside.validate(con, list(secs), m["teams"], state["season_year"])
+        except ValueError as e:
+            raise ValueError(f"Match {i}: {e}") from None
+
     # A promo and a match are different segments of the same night, so somebody
     # can do both — but not two promos.
     talkers = [w for p in promo_card for w in (p.get("wrestler_ids") or [])]
@@ -696,10 +771,14 @@ def run_show(
     results = []
     for slot, m in enumerate(card, start=1):
         is_main = (slot == len(card))
+        # `seconds` is the ringside managers, one slot per side; `managers` is the
+        # older Manager's-Championship field, which means the same thing for that
+        # one belt. Accept either so an existing card still works.
+        secs = m.get("seconds") or m.get("managers")
         res = simulate_match(con, show_id, slot, m["teams"], seed, m.get("title_id"),
                              is_ppv=is_ppv, stipulation=m.get("stipulation"),
                              prod_bonus=prod_bonus, match_type=m.get("match_type"),
-                             is_main=is_main)
+                             is_main=is_main, seconds=secs)
         res["is_main_event"] = is_main
         # Manager belt: the winning side's manager becomes/stays champion.
         if res.get("title_tier") == "manager" and m.get("managers") and res["winner_team"] is not None:

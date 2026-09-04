@@ -29,12 +29,18 @@ type Row = {
   title: number
   stip: string
   type: string
+  /** Who each side fights on behalf of — the Manager's Championship only. */
   managers: number[]
+  /** A manager at RINGSIDE per side, index-aligned with `teams`. 0 = nobody. */
+  seconds: number[]
   why?: string
 }
 type PromoRow = { kind: string; ids: number[]; why?: string }
 
 const SLOT = (i: number, n: number) => (i === 0 ? 'OPENER' : i === n - 1 ? 'MAIN EVENT' : 'MID CARD')
+
+/** Remembered, because a GM who books by hand should not say so every week. */
+const AUTOBOOK_KEY = 'gm2000.booking.autobook'
 
 /** A stamina bar. Below 45 she is worn down and the card should say so. */
 function Stamina({ value }: { value: number }) {
@@ -67,9 +73,27 @@ export default function BookingScreen({
   })
   const { data: cat } = useQuery({ queryKey: ['bookcat'], queryFn: fetchBookingCatalogue })
   const { data: roster = [] } = useQuery({ queryKey: ['roster'], queryFn: fetchRoster })
+  /**
+   * AUTO-BOOK IS OPT-IN.
+   *
+   * The screen used to load the pre-booked card the instant it opened, which
+   * quietly made every show the engine's idea with the GM's edits on top.
+   * Booking a card from scratch IS the game, so manual is the default and the
+   * suggestion is a button you press.
+   */
+  const [autoBook, setAutoBook] = useState(() => {
+    try { return localStorage.getItem(AUTOBOOK_KEY) === '1' } catch { return false }
+  })
+  useEffect(() => {
+    try { localStorage.setItem(AUTOBOOK_KEY, autoBook ? '1' : '0') } catch { /* private mode */ }
+  }, [autoBook])
+
+  // Only fetched when it is wanted — a manual booker should not be paying for a
+  // suggestion she never looks at.
   const { data: suggestion, isFetching: suggesting, refetch: resuggest } = useQuery({
     queryKey: ['suggest', brandId, kind],
     queryFn: () => fetchSuggestion(brandId, kind),
+    enabled: autoBook,
   })
 
   const [rows, setRows] = useState<Row[]>([])
@@ -79,25 +103,44 @@ export default function BookingScreen({
 
   const types = cat?.match_types ?? []
   const promoTypes = cat?.promo_types ?? []
+  const ringsideOptions = bookable?.ringside ?? []
   const typeOf = useCallback(
     (k: string): MatchType | undefined => types.find((t) => t.key === k), [types])
 
   // Load the suggestion in. Deliberately does NOT overwrite edits: once the GM
   // has changed a row, the card is hers until she asks for a new one.
   useEffect(() => {
-    if (!suggestion || touched) return
+    if (!autoBook || !suggestion || touched) return
     setRows(suggestion.matches.map((m) => ({
       teams: m.teams.map((t) => [...t]),
       title: m.title_id ?? 0,
       stip: m.stipulation ?? 'normal',
       type: m.match_type ?? 'singles',
       managers: m.managers ?? [],
+      seconds: m.teams.map(() => 0),
       why: m.why,
     })))
     setPromoRows(suggestion.promos.map((p) => ({
       kind: p.kind, ids: [...p.wrestler_ids], why: p.why,
     })))
-  }, [suggestion, touched])
+  }, [autoBook, suggestion, touched])
+
+  // MANUAL MODE opens on the format's SHAPE: the right number of empty rows, so
+  // the tally reads as a target rather than a surprise, but nobody in them.
+  useEffect(() => {
+    if (autoBook) return
+    const f = cat?.formats.find((x) => x.key === kind)
+    const nm = f?.matches ?? (kind === 'ppv' ? 6 : 4)
+    const np = f?.promos ?? 2
+    setRows(Array.from({ length: nm }, () => ({
+      teams: [[0], [0]] as number[][], title: 0, stip: 'normal', type: 'singles',
+      managers: [] as number[], seconds: [0, 0],
+    })))
+    setPromoRows(Array.from({ length: np }, () => ({
+      kind: cat?.promo_types?.[0]?.key ?? 'callout', ids: [0],
+    })))
+    setTouched(false)
+  }, [autoBook, kind, cat])
 
   const mgrTitleId = bookable?.titles.find((t) => t.tier === 'manager')?.id ?? 0
   const managers = bookable?.managers ?? []
@@ -152,7 +195,11 @@ export default function BookingScreen({
         for (let p = 0; p < per(s); p++) side.push(flat[k++] ?? 0)
         teams.push(side)
       }
-      return { ...r, type: key, teams, why: undefined }
+      // Seconds are index-aligned with the sides, so resizing one resizes the
+      // other — otherwise switching to a Fatal 4-Way would keep two managers
+      // and silently lose which side each was on.
+      const seconds = teams.map((_, si) => r.seconds[si] ?? 0)
+      return { ...r, type: key, teams, seconds, why: undefined }
     })))
   }
 
@@ -167,15 +214,21 @@ export default function BookingScreen({
   const addSide = (i: number) => {
     const r = rows[i]; const t = typeOf(r.type)
     if (!t || r.teams.length >= t.max_sides) return
-    setRow(i, { teams: [...r.teams.map((x) => [...x]), Array(t.min_per_side).fill(0)] })
+    setRow(i, {
+      teams: [...r.teams.map((x) => [...x]), Array(t.min_per_side).fill(0)],
+      seconds: [...r.seconds, 0],
+    })
   }
   const dropSide = (i: number) => {
     const r = rows[i]; const t = typeOf(r.type)
     if (!t || r.teams.length <= t.min_sides) return
-    setRow(i, { teams: r.teams.slice(0, -1) })
+    setRow(i, { teams: r.teams.slice(0, -1), seconds: r.seconds.slice(0, -1) })
   }
 
-  const emptyRow = (): Row => ({ teams: [[0], [0]], title: 0, stip: 'normal', type: 'singles', managers: [] })
+  const emptyRow = (): Row => ({
+    teams: [[0], [0]], title: 0, stip: 'normal', type: 'singles',
+    managers: [], seconds: [0, 0],
+  })
   const emptyPromo = (): PromoRow => ({ kind: promoTypes[0]?.key ?? 'callout', ids: [0] })
 
   const card: CardMatch[] = useMemo(() => rows
@@ -185,6 +238,7 @@ export default function BookingScreen({
       title_id: r.title || null,
       stipulation: r.stip,
       match_type: r.type,
+      seconds: r.seconds.map((x) => x || null),
       ...(r.title === mgrTitleId && mgrTitleId ? { managers: r.managers } : {}),
     })), [rows, mgrTitleId])
 
@@ -243,15 +297,45 @@ export default function BookingScreen({
                 </button>
               )
             })}
-            <button onClick={() => { setTouched(false); resuggest() }} disabled={suggesting}
-              className="label text-[9px] px-2 py-1 rounded border border-edge text-slate-400 hover:border-gold/60 hover:text-gold disabled:opacity-40">
-              {suggesting ? '…' : '↻ Re-suggest'}
+            {/* MANUAL by default. Auto-book is a button you press, not a
+                thing that has already happened to your card. */}
+            <button
+              onClick={() => {
+                if (autoBook) { setAutoBook(false); return }
+                setAutoBook(true); setTouched(false)
+              }}
+              title={autoBook
+                ? 'Clear it and book this card from scratch'
+                : 'Let creative pre-book this card — rivalries first, belt on the main event'}
+              className={`label text-[9px] px-2 py-1 rounded border ${
+                autoBook ? 'border-gold text-gold bg-gold/10'
+                  : 'border-edge text-slate-500 hover:text-slate-300'}`}>
+              {/* NOT "auto-book": the left rail already has a mode called that,
+                  which runs the whole show without you. This only pre-fills the
+                  card you are about to edit, so it borrows the language the
+                  suggestion itself uses. */}
+              {autoBook ? '✓ Pre-booked' : '✨ Pre-book it for me'}
             </button>
+            {autoBook && (
+              <button onClick={() => { setTouched(false); resuggest() }} disabled={suggesting}
+                className="label text-[9px] px-2 py-1 rounded border border-edge text-slate-400 hover:border-gold/60 hover:text-gold disabled:opacity-40">
+                {suggesting ? '…' : '↻ Again'}
+              </button>
+            )}
           </div>
         </div>
 
+        {!autoBook && (
+          <p className="text-[10px] text-slate-600 mb-2 leading-snug max-w-[640px]">
+            Booking this one yourself. The rows are the format's shape — fill them how you
+            like, add or remove any of them, and put a manager at ringside for either side.
+            Press <span className="text-gold">Pre-book it for me</span> if you would rather
+            start from creative's card.
+          </p>
+        )}
+
         {/* Why the pre-booker built it this way. */}
-        {!!suggestion?.notes.length && !touched && (
+        {autoBook && !!suggestion?.notes.length && !touched && (
           <div className="card p-2.5 mb-2 border-l-2 border-l-gold/50">
             <div className="label text-[8px] text-gold mb-1">Creative's pitch</div>
             <ul className="text-[10px] text-slate-400 leading-relaxed space-y-0.5">
@@ -300,6 +384,19 @@ export default function BookingScreen({
                               exclude={usedInMatches} options={healthy}
                               onChange={(v) => setSlot(i, si, pi, v)} />
                           ))}
+                          {/* A manager at RINGSIDE for this side. She is not in
+                              the match: no fatigue, no record, no injury — she
+                              lifts her side's chances and can steal one. */}
+                          {ringsideOptions.length > 0 && (
+                            <SecondSelect
+                              value={r.seconds[si] ?? 0}
+                              options={ringsideOptions}
+                              exclude={new Set(r.seconds.filter((x, j) => x && j !== si))}
+                              inRing={usedInMatches}
+                              onChange={(v) => setRow(i, {
+                                seconds: r.seconds.map((x, j) => (j === si ? v : x)),
+                              })} />
+                          )}
                         </div>
                       </div>
                     </div>
@@ -567,6 +664,45 @@ function WSelect({ value, onChange, options, exclude, self }: {
         </option>
       ))}
     </select>
+  )
+}
+
+/**
+ * A manager at ringside for one side.
+ *
+ * Shown with what she is worth, because the whole point of the feature is that
+ * the choice has a consequence: Influence lifts her side's chances, Mic lifts
+ * the match for everybody, and a heel is far likelier to cheat. `inRing`
+ * disables anyone already booked IN the match — the sim refuses that, so
+ * offering it would be offering an error.
+ */
+function SecondSelect({ value, onChange, options, exclude, inRing }: {
+  value: number; onChange: (v: number) => void
+  options: { id: number; name: string; mic: number; influence: number
+             alignment: string; lift: string; signed_as_manager: boolean }[]
+  exclude: Set<number>; inRing: Set<number>
+}) {
+  const chosen = options.find((m) => m.id === value)
+  return (
+    <div>
+      <select value={value} onChange={(e) => onChange(Number(e.target.value))}
+        title="A manager at ringside. Not in the match — she lifts this side."
+        className="w-full bg-canvas border border-edge rounded px-2 py-1 text-[11px] text-slate-400">
+        <option value={0}>— no manager —</option>
+        {options.map((m) => (
+          <option key={m.id} value={m.id}
+            disabled={(exclude.has(m.id) && m.id !== value) || inRing.has(m.id)}>
+            {m.alignment === 'heel' ? '▼' : '▲'} {m.name} · INF {m.influence}
+            {inRing.has(m.id) ? ' (in the match)' : ''}
+          </option>
+        ))}
+      </select>
+      {chosen && (
+        <p className="text-[9px] text-slate-600 mt-0.5">
+          {chosen.lift}{chosen.alignment === 'heel' ? ' · likely to cheat' : ''}
+        </p>
+      )}
+    </div>
   )
 }
 

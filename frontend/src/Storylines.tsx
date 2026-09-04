@@ -17,6 +17,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchStorylines, planBlowoff, fetchCalendar, prettyDate,
+  fetchStorylineKinds, sourStoryline, createStoryline, fetchRoster,
   type Storyline,
 } from './api'
 
@@ -30,6 +31,11 @@ const STAGE_COLOUR: Record<string, string> = {
 const BEAT_ICON: Record<string, string> = {
   match: '⚔', promo: '🎤', run_in: '💥', turn: '🔄',
   opened: '●', settled: '🤝', planned: '📌',
+}
+
+/** A romance is not a rivalry, so it should not be the colour of one. */
+const KIND_COLOUR: Record<string, string> = {
+  rivalry: '#f87171', romance: '#f472b6', alliance: '#38bdf8', mentorship: '#a78bfa',
 }
 
 export default function Storylines() {
@@ -49,37 +55,118 @@ export default function Storylines() {
   }
 
   if (isLoading) return null
-  if (!arcs.length) {
-    return (
-      <div className="px-4 py-3 border-b border-edge">
-        <h3 className="label text-[11px] text-slate-400 tracking-wider mb-1">Live storylines</h3>
-        <p className="text-[11px] text-slate-600 max-w-[560px]">
-          No feuds running. Start one from a wrestler's panel, or grant a storyline request in
-          the locker room — a rivalry is the single best reason to put two women in a ring.
-        </p>
-      </div>
-    )
-  }
 
   return (
     <div className="px-4 py-3 border-b border-edge">
       <div className="flex items-baseline gap-2 mb-1">
         <h3 className="label text-[11px] text-slate-400 tracking-wider">Live storylines</h3>
-        <span className="stat text-[11px] text-gold">{arcs.length}</span>
+        {arcs.length > 0 && <span className="stat text-[11px] text-gold">{arcs.length}</span>}
       </div>
-      <p className="text-[10px] text-slate-600 mb-2.5 max-w-[640px] leading-snug">
-        Point a feud at a pay-per-view and the booker stops giving away the singles match — it
-        builds with promos and tag matches until the date instead.
+      <p className="text-[10px] text-slate-600 mb-2.5 max-w-[680px] leading-snug">
+        A rivalry is not the only story two people can be in. A romance, an alliance or a
+        mentorship builds the crowd's investment — and turning one sour hands you a feud that
+        starts hot instead of cold. Managers count.
       </p>
       {err && <p className="text-[11px] text-blood mb-2">{err}</p>}
-      <div className="space-y-1.5">
-        {arcs.map((a) => (
-          <ArcRow key={a.id} a={a} cal={cal} open={open === a.id}
-            onToggle={() => setOpen(open === a.id ? null : a.id)}
-            onDone={invalidate} onErr={setErr} />
+
+      <NewStoryline onDone={invalidate} onErr={setErr} />
+
+      {arcs.length === 0
+        ? <p className="text-[11px] text-slate-600 max-w-[560px] mt-2">
+            Nothing running. Start one above, or grant a storyline request in the locker room.
+          </p>
+        : <div className="space-y-1.5 mt-2.5">
+            {arcs.map((a) => (
+              <ArcRow key={a.id} a={a} cal={cal} open={open === a.id}
+                onToggle={() => setOpen(open === a.id ? null : a.id)}
+                onDone={invalidate} onErr={setErr} />
+            ))}
+          </div>}
+    </div>
+  )
+}
+
+/**
+ * Start a storyline of any kind between any two people.
+ *
+ * Deliberately not restricted to wrestlers: a romance between a manager and the
+ * woman she manages is one of the most useful things on this list, and nothing
+ * in the data model needed changing to allow it.
+ */
+function NewStoryline({ onDone, onErr }: { onDone: () => void; onErr: (s: string) => void }) {
+  const [show, setShow] = useState(false)
+  const [a, setA] = useState(0)
+  const [b, setB] = useState(0)
+  const [kind, setKind] = useState('rivalry')
+  const { data: kinds = [] } = useQuery({
+    queryKey: ['storyline-kinds'], queryFn: fetchStorylineKinds,
+  })
+  const { data: roster = [] } = useQuery({ queryKey: ['roster'], queryFn: fetchRoster })
+  const signed = roster.filter((r) => r.contract && !r.removed)
+  const create = useMutation({
+    mutationFn: () => createStoryline(a, b, kind,
+      signed.find((r) => r.id === a)?.contract?.brand_id ?? null),
+    onSuccess: () => { setA(0); setB(0); setShow(false); onDone() },
+    onError: (e: Error) => onErr(e.message),
+  })
+  const chosen = kinds.find((k) => k.key === kind)
+
+  if (!show) {
+    return (
+      <button onClick={() => setShow(true)}
+        className="label text-[9px] px-2 py-1 rounded border border-edge text-slate-400 hover:border-gold/60 hover:text-gold">
+        + Start a storyline
+      </button>
+    )
+  }
+  return (
+    <div className="card p-3">
+      <div className="flex flex-wrap gap-1 mb-2">
+        {kinds.map((k) => (
+          <button key={k.key} onClick={() => setKind(k.key)} title={k.desc}
+            className={`label text-[9px] px-2 py-1 rounded border ${
+              kind === k.key ? 'border-gold text-gold bg-gold/10'
+                : 'border-edge text-slate-500 hover:text-slate-300'}`}>
+            {k.icon} {k.label}
+          </button>
         ))}
       </div>
+      {chosen && <p className="text-[10px] text-slate-500 mb-2 leading-snug">{chosen.desc}</p>}
+      <div className="flex items-center gap-1.5">
+        <PersonSelect value={a} exclude={b} options={signed} onChange={setA} />
+        <span className="text-[10px] text-slate-600">{chosen?.wants_match ? 'v' : '&'}</span>
+        <PersonSelect value={b} exclude={a} options={signed} onChange={setB} />
+      </div>
+      <div className="flex items-center gap-1.5 mt-2">
+        <button disabled={!a || !b || a === b || create.isPending}
+          onClick={() => create.mutate()}
+          className="text-[11px] px-3 py-1 rounded font-semibold text-black disabled:opacity-30"
+          style={{ background: 'var(--color-gold)' }}>
+          {create.isPending ? 'Starting…' : 'Start it'}
+        </button>
+        <button onClick={() => setShow(false)}
+          className="text-[11px] px-2 py-1 rounded border border-edge text-slate-400">
+          cancel
+        </button>
+      </div>
     </div>
+  )
+}
+
+function PersonSelect({ value, onChange, options, exclude }: {
+  value: number; onChange: (v: number) => void; exclude: number
+  options: { id: number; name: string; working_role: string }[]
+}) {
+  return (
+    <select value={value} onChange={(e) => onChange(Number(e.target.value))}
+      className="flex-1 min-w-0 bg-canvas border border-edge rounded px-2 py-1 text-[11px]">
+      <option value={0}>— pick —</option>
+      {options.map((r) => (
+        <option key={r.id} value={r.id} disabled={r.id === exclude}>
+          {r.name}{r.working_role === 'manager' ? ' (mgr)' : ''}
+        </option>
+      ))}
+    </select>
   )
 }
 
@@ -95,7 +182,15 @@ function ArcRow({ a, cal, open, onToggle, onDone, onErr }: {
     onSuccess: onDone,
     onError: (e: Error) => onErr(e.message),
   })
-  const colour = STAGE_COLOUR[a.stage] ?? '#94a3b8'
+  const sour = useMutation({
+    mutationFn: () => sourStoryline(a.id),
+    onSuccess: onDone,
+    onError: (e: Error) => onErr(e.message),
+  })
+  // A non-rivalry is coloured by what it IS; a rivalry by how far along it is.
+  const colour = a.kind && a.kind !== 'rivalry'
+    ? (KIND_COLOUR[a.kind] ?? '#94a3b8')
+    : (STAGE_COLOUR[a.stage] ?? '#94a3b8')
   const lead = a.series.leader
   const score = `${a.series.a_wins}–${a.series.b_wins}`
 
@@ -106,7 +201,9 @@ function ArcRow({ a, cal, open, onToggle, onDone, onErr }: {
           <span className={`text-[13px] ${lead === a.a_id ? 'text-slate-100' : 'text-slate-400'}`}>
             {a.a_name}
           </span>
-          <span className="text-slate-600 text-[11px]">v</span>
+          <span className="text-slate-600 text-[11px]">
+            {a.wants_match === false ? '&' : 'v'}
+          </span>
           <span className={`text-[13px] ${lead === a.b_id ? 'text-slate-100' : 'text-slate-400'}`}>
             {a.b_name}
           </span>
@@ -115,9 +212,10 @@ function ArcRow({ a, cal, open, onToggle, onDone, onErr }: {
           )}
           <span className="label text-[8px] px-1.5 py-[2px] rounded ml-auto shrink-0"
             style={{ background: `${colour}22`, color: colour }}>
-            {a.stage_label}
+            {a.kind_icon} {a.stage_label}
           </span>
-          <span className="stat text-[13px] shrink-0" style={{ color: colour }}>{a.heat}</span>
+          <span className="stat text-[13px] shrink-0" style={{ color: colour }}
+            title={a.heat_word ? `${a.heat_word}: ${a.heat}` : undefined}>{a.heat}</span>
         </div>
         <div className="h-[2px] rounded bg-raised overflow-hidden mt-1">
           <div className="h-full" style={{ width: `${a.heat}%`, background: colour }} />
@@ -134,7 +232,31 @@ function ArcRow({ a, cal, open, onToggle, onDone, onErr }: {
 
       {open && (
         <div className="mt-2 pt-2 border-t border-edge-soft">
-          {/* ---- the planner ---- */}
+          {/* Turning it sour IS the payoff, not a failure — it converts a
+              story the crowd is already invested in into a feud that starts
+              hot, which is strictly better than opening a cold one. */}
+          {a.sours_to && (
+            <div className="mb-2.5">
+              <button disabled={sour.isPending} onClick={() => sour.mutate()}
+                className="text-[11px] px-3 py-1 rounded border disabled:opacity-40"
+                style={{ borderColor: `${KIND_COLOUR[a.kind] ?? '#94a3b8'}88`,
+                         color: KIND_COLOUR[a.kind] ?? '#94a3b8' }}>
+                {sour.isPending ? 'Turning…' : `${a.sour_label} — make it a rivalry`}
+              </button>
+              <p className="text-[9px] text-slate-600 mt-1 leading-snug">
+                The {a.heat_word} you have banked carries over, so the feud starts hot.
+              </p>
+            </div>
+          )}
+          {a.was_kind && (
+            <p className="text-[10px] text-slate-500 mb-2">
+              This began as {a.was_kind === 'romance' ? 'a romance' : `an ${a.was_kind}`}.
+            </p>
+          )}
+
+          {/* Only a rivalry has a blow-off to build toward. */}
+          {a.wants_match !== false && (
+          <>
           <div className="label text-[8px] text-slate-500 mb-1">Build it to</div>
           <div className="flex items-center gap-1.5 flex-wrap mb-2.5">
             {(cal?.schedule ?? []).map((p) => {
@@ -163,6 +285,8 @@ function ArcRow({ a, cal, open, onToggle, onDone, onErr }: {
               </button>
             )}
           </div>
+          </>
+          )}
           <p className="text-[10px] text-slate-500 mb-2.5 leading-snug">{a.stage_note}</p>
 
           {/* ---- the story so far ---- */}

@@ -38,6 +38,8 @@ import migrate_cards  # noqa: E402
 import migrate_ratings  # noqa: E402
 import morale as morale_mod  # noqa: E402
 import promos as PR  # noqa: E402
+import revise  # noqa: E402
+import ringside  # noqa: E402
 import storylines  # noqa: E402
 import turns  # noqa: E402
 import rankings  # noqa: E402
@@ -1272,6 +1274,9 @@ def bookable(brand_id: str, both_brands: bool = False) -> dict:
                  if f["a_id"] in ids or f["b_id"] in ids]
         stables = game.list_stables(c)
         return {"wrestlers": wrestlers, "titles": titles, "managers": managers,
+                # Everyone who can be put at ringside, with what she is worth.
+                # Same source the sim validates against — see ringside.bookable.
+                "ringside": ringside.bookable(c, brand_ids, season),
                 "feuds": feuds,
                 "tag_teams": [{"id": t["id"], "name": t["name"],
                                "members": [m["wrestler_id"] for m in t["members"]]}
@@ -1422,13 +1427,23 @@ def show_detail(show_id: int) -> dict:
         key = m.get("match_type") or MT.infer([teams[k] for k in sorted(teams)])
         m["match_type"] = key
         m["match_type_label"] = MT.get(key)["label"]
+        # Which side won, as a number — the result view needs it to offer a
+        # revision, and inferring it from is_winner flags in the UI would put
+        # the same rule in two places.
+        m["winner_team"] = next(
+            (p["team"] for p in m["participants"] if p["is_winner"]), None)
+        m["stars"] = sim.stars_from_quality(m["quality"] or 0)
     c = conn()
     try:
         promo_list = PR.for_show(c, show_id)
         reactions = crowd.show_reactions(c, show_id)
+        for m in matches:
+            m["seconds"] = ringside.for_match(c, m["id"])
+            m["revisions"] = revise.revisions(c, m["id"])
     finally:
         c.close()
-    return {**base[0], "matches": matches, "promos": promo_list, "crowd": reactions}
+    return {**base[0], "matches": matches, "promos": promo_list, "crowd": reactions,
+            "revise_limits": revise.LIMITS}
 
 
 @app.get("/api/titles")
@@ -2509,5 +2524,138 @@ def extension_offer_ep(body: ExtensionOfferBody) -> dict:
         return negotiate.offer(c, body.wrestler_id, cur["brand_id"], body.salary,
                                perks=body.perks, kind=kind, context="extension",
                                years=body.years, signing_bonus=body.signing_bonus)
+    finally:
+        c.close()
+
+
+# ============================================================ results & revision
+#
+# The engine simulates; the GM decides. Every other suggestion-shaped thing in
+# this save works that way — ratings progression, turns, the pre-booked card —
+# and match results were the last place it did not.
+
+@app.get("/api/matches/{match_id}")
+def match_detail(match_id: int) -> dict:
+    """One match in full: sides, who won, the star rating, what it awarded."""
+    c = conn()
+    try:
+        d = revise.match_detail(c, match_id)
+        d["seconds"] = ringside.for_match(c, match_id)
+        return d
+    except game.SigningError as e:
+        raise HTTPException(404, str(e))
+    finally:
+        c.close()
+
+
+class ReviseWinnerBody(BaseModel):
+    # None makes it a draw.
+    winner_team: int | None = None
+    finish: str | None = None
+
+
+@app.post("/api/matches/{match_id}/winner")
+def revise_winner(match_id: int, body: ReviseWinnerBody) -> dict:
+    """Overrule who won. Puts back records, momentum, the belt and the beat."""
+    c = conn()
+    try:
+        return revise.set_winner(c, match_id, body.winner_team, body.finish)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+class ReviseStarsBody(BaseModel):
+    stars: float
+
+
+@app.post("/api/matches/{match_id}/stars")
+def revise_stars(match_id: int, body: ReviseStarsBody) -> dict:
+    """Overrule the star rating. Re-scores the show and its TV rating with it."""
+    c = conn()
+    try:
+        return revise.set_stars(c, match_id, body.stars)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+# ============================================================ ringside
+
+@app.get("/api/ringside")
+def ringside_options(brand_id: str, both_brands: bool = False) -> dict:
+    """Who can be put at ringside, and what each is worth.
+
+    Offers exactly what `ringside.validate` will accept, so the booking screen
+    can never present a manager the sim would then refuse.
+    """
+    c = conn()
+    try:
+        st = current_state(c)
+        if not st:
+            return {"managers": []}
+        brands = [b[0] for b in game.BRANDS] if both_brands else [brand_id]
+        return {"managers": ringside.bookable(c, brands, st["season_year"]),
+                "effect": {
+                    "strength_per_influence": ringside.STRENGTH_PER_INFLUENCE,
+                    "quality_per_mic": ringside.QUALITY_PER_MIC,
+                    "note": "Influence lifts her side's chances; Mic lifts the match "
+                            "for everyone. A heel manager is far likelier to cheat.",
+                }}
+    finally:
+        c.close()
+
+
+# ============================================================ storyline kinds
+
+# A LITERAL path, not /api/storylines/kinds. FastAPI matches in declaration
+# order, and /api/storylines/{fid} is declared earlier — so "kinds" was being
+# parsed as a feud id and answered with a 422 instead. Renaming is sturdier than
+# depending on the order two blocks of routes happen to be defined in.
+@app.get("/api/storyline-kinds")
+def storyline_kinds() -> list[dict]:
+    """Rivalry, romance, alliance, mentorship — and what each one wants."""
+    return [{"key": k, **v} for k, v in storylines.KINDS.items()]
+
+
+class StorylineBody(BaseModel):
+    a_id: int
+    b_id: int
+    brand_id: str | None = None
+    note: str | None = None
+    kind: str = "rivalry"
+
+
+@app.post("/api/storylines")
+def create_storyline(body: StorylineBody) -> dict:
+    """Open a storyline of any kind between any two people, managers included."""
+    c = conn()
+    try:
+        return game.create_feud(c, body.a_id, body.b_id, body.brand_id,
+                                body.note, body.kind)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+class SourBody(BaseModel):
+    note: str | None = None
+
+
+@app.post("/api/storylines/{fid}/sour")
+def sour_storyline(fid: int, body: SourBody) -> dict:
+    """Break up a romance, betray an alliance, turn a student on her teacher.
+
+    Converts it to a rivalry that starts HOT, which is the whole point of having
+    run the other kind first.
+    """
+    c = conn()
+    try:
+        return storylines.sour(c, fid, body.note)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
     finally:
         c.close()

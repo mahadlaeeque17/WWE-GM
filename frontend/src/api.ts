@@ -508,6 +508,12 @@ export const runShow = (brand_id: string, name: string, matches = 4, is_ppv = fa
  */
 export interface CardMatch {
   teams: number[][]; title_id: number | null; managers?: number[]
+  /**
+   * A manager at ringside per side, index-aligned with `teams`. 0/undefined
+   * means nobody. Distinct from `managers`, which is the older field meaning
+   * "who this side is fighting on behalf of" for the Manager's Championship.
+   */
+  seconds?: (number | null)[]
   stipulation?: string; match_type?: string
   /** Why the pre-booker put this match on the show. Not sent back. */
   why?: string; slot?: number
@@ -528,7 +534,9 @@ export const runCard = (
       brand_id, name, is_ppv, ppv_name: ppv_name ?? null,
       card: card.map((m) => ({
         teams: m.teams, title_id: m.title_id, stipulation: m.stipulation ?? 'normal',
-        match_type: m.match_type ?? 'singles', ...(m.managers ? { managers: m.managers } : {}),
+        match_type: m.match_type ?? 'singles',
+        ...(m.managers ? { managers: m.managers } : {}),
+        ...(m.seconds?.some(Boolean) ? { seconds: m.seconds } : {}),
       })),
       promos: promos.map((p) => ({ kind: p.kind, wrestler_ids: p.wrestler_ids, topic: p.topic ?? null })),
       logistics: logistics ?? null,
@@ -583,6 +591,8 @@ export interface Bookable {
     prestige: number; team_size: number; brand_id: string | null
   }[]
   managers: { id: number; name: string; brand_id: string }[]
+  /** Everyone who can be put at ringside, with what she is worth. */
+  ringside: RingsideOption[]
   feuds: Feud[]
   tag_teams: { id: number; name: string; members: number[] }[]
   factions: { id: number; name: string; members: number[] }[]
@@ -1087,7 +1097,7 @@ export interface FeudBeat {
   winner_id: number | null; winner_name: string | null
 }
 export interface StorylineNext {
-  want: 'keep_apart' | 'talk' | 'physical' | 'blowoff'
+  want: 'keep_apart' | 'talk' | 'physical' | 'blowoff' | 'sour' | 'team'
   segment: 'promo' | 'match'
   advice: string
   stage: string
@@ -1098,6 +1108,14 @@ export interface Storyline {
   id: number; a_id: number; b_id: number; a_name: string; b_name: string
   brand_id: string | null; heat: number; status: string; note: string | null
   started_on: string | null
+  /** rivalry | romance | alliance | mentorship — see storylines.KINDS. */
+  kind: string; kind_label: string; kind_icon: string; kind_desc: string
+  /** What this kind calls its heat: "heat", "investment", "trust", "bond". */
+  heat_word: string
+  wants_match: boolean
+  sours_to: string | null; sour_label: string | null
+  /** What it used to be, if a romance or alliance was soured into a rivalry. */
+  was_kind: string | null
   stage: string; stage_label: string; stage_note: string
   planned_blowoff: string | null; blowoff_label: string | null
   beats: FeudBeat[]
@@ -1186,4 +1204,95 @@ export const extensionOffer = (
   req<ExtensionVerdict>('/api/negotiate/extension-offer', {
     method: 'POST',
     body: JSON.stringify({ wrestler_id, salary, years, perks, signing_bonus }),
+  })
+
+// ====================================================== results & revision
+//
+// The engine simulates; the GM decides. Every other suggestion-shaped thing in
+// the save works that way, and match results were the last place it did not.
+
+export interface MatchSide {
+  team: number
+  wrestlers: { id: number; name: string }[]
+}
+export interface MatchRevision {
+  id: number; match_id: number; on_date: string
+  field: string; from_value: string | null; to_value: string | null
+  note: string | null
+}
+export interface MatchDetail {
+  match_id: number; show_id: number; show_name: string; held_on: string
+  brand_id: string; is_ppv: number; slot: number
+  quality: number | null; stars: number; finish: string
+  title_id: number | null; match_type: string | null; stipulation: string | null
+  winner_team: number | null
+  sides: MatchSide[]
+  awarded_title: Record<string, unknown> | null
+  revisions: MatchRevision[]
+  seconds: MatchSecond[]
+  /** What a revision does NOT reach back and fix. Shown to the GM verbatim. */
+  limits: string
+}
+export const fetchMatch = (matchId: number) => req<MatchDetail>(`/api/matches/${matchId}`)
+/** Overrule who won. `winner_team: null` makes it a draw. */
+export const reviseWinner = (matchId: number, winner_team: number | null, finish?: string) =>
+  req<any>(`/api/matches/${matchId}/winner`, {
+    method: 'POST', body: JSON.stringify({ winner_team, finish: finish ?? null }),
+  })
+/** Overrule the star rating. Re-scores the show and its TV rating with it. */
+export const reviseStars = (matchId: number, stars: number) =>
+  req<any>(`/api/matches/${matchId}/stars`, {
+    method: 'POST', body: JSON.stringify({ stars }),
+  })
+
+export const FINISHES = [
+  { key: 'pinfall', label: 'Pinfall' },
+  { key: 'submission', label: 'Submission' },
+  { key: 'dq', label: 'Disqualification' },
+  { key: 'countout', label: 'Count-out' },
+  { key: 'draw', label: 'Draw' },
+] as const
+
+// ============================================================== ringside
+//
+// A manager at ringside is NOT a participant: no fatigue, no record, no injury
+// risk. She lifts her side's chances (Influence), lifts the match for everyone
+// (Mic), and can occasionally steal one outright.
+
+export interface RingsideOption {
+  id: number; name: string; brand_id: string
+  mic: number; influence: number; alignment: string
+  /** Plain-English "+6% to her side", computed server-side. */
+  lift: string
+  quality: number
+  signed_as_manager: boolean
+}
+export interface MatchSecond {
+  wrestler_id: number; team: number; quality: number | null
+  note: string | null; name: string; profile_image_id: number | null
+}
+export const fetchRingside = (brand_id: string, both_brands = false) =>
+  req<{ managers: RingsideOption[]; effect: { note: string } }>(
+    `/api/ringside?brand_id=${brand_id}&both_brands=${both_brands}`)
+
+// ======================================================== storyline kinds
+
+export interface StorylineKind {
+  key: string; label: string; icon: string; desc: string
+  wants_match: boolean; heat_word: string
+  sours_to: string | null; sour_label?: string; sour_note?: string
+}
+export const fetchStorylineKinds = () => req<StorylineKind[]>('/api/storyline-kinds')
+/** Open a storyline of any kind between any two people, managers included. */
+export const createStoryline = (
+  a_id: number, b_id: number, kind: string, brand_id?: string | null, note?: string,
+) =>
+  req<any>('/api/storylines', {
+    method: 'POST',
+    body: JSON.stringify({ a_id, b_id, kind, brand_id: brand_id ?? null, note: note ?? null }),
+  })
+/** Break up a romance, betray an alliance, turn a student on her teacher. */
+export const sourStoryline = (fid: number, note?: string) =>
+  req<any>(`/api/storylines/${fid}/sour`, {
+    method: 'POST', body: JSON.stringify({ note: note ?? null }),
   })
