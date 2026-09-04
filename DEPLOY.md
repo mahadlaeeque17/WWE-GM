@@ -108,7 +108,18 @@ Live at **https://wwe-gm.vercel.app** — recorded here because it was not writt
 down anywhere and had to be guessed at.
 
 Open **`/api/store/status`**. It is the first thing to look at if a save ever
-appears to reset itself:
+appears to reset itself — and **`"writable": false`** is the specific answer.
+It means this boot never managed to download your save, so the app is running
+on the bundled seed and is REFUSING to push it up over the stored one. Reload
+once the store is reachable; nothing has been lost.
+
+> That guard exists because of the order boot has to do things in: the bundled
+> seed is copied into place FIRST and the real save is downloaded over it. So a
+> failed download used to leave the app running happily on an empty roster, and
+> the very next write pushed that over a season of play — no crash, no error,
+> just the wrong file persisted. Refusing to save is a bad afternoon;
+> overwriting is a lost save.
+
 
 ```json
 { "mode": "blob", "enabled": true, "configured": true, "durable": true,

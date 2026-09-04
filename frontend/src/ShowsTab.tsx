@@ -5,10 +5,11 @@ import {
   aiCommentary, aiRecap, aiRivalBook, imageUrl, type RosterRow,
 } from './api'
 import { Stars } from './ui'
-import { REACTION_COLOUR, reviseWinner, reviseStars, FINISHES } from './api'
+import { REACTION_COLOUR, reviseWinner, reviseStars, undoRevision, FINISHES } from './api'
 import RumblePanel from './RumblePanel'
 import CalendarView from './CalendarView'
 import BookingScreen from './BookingScreen'
+import ShowRunner from './ShowRunner'
 import { playShow } from './sound'
 import { usePhotos } from './prefs'
 
@@ -33,6 +34,14 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
   const [matches, setMatches] = useState(4)
   const [open, setOpen] = useState<number | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  /**
+   * The show just run, if it has not been walked through yet.
+   *
+   * Set by every path that runs a show, cleared when the GM finishes the
+   * reveal or navigates. Holding the RESULT rather than a flag is what lets the
+   * runner work without re-fetching anything — the card is already in hand.
+   */
+  const [running, setRunning] = useState<any | null>(null)
 
   const brand = brands.find((b) => b.brand_id === brandId)
   const { data: detail } = useQuery({
@@ -41,7 +50,8 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
     enabled: open !== null,
   })
 
-  const invalidate = (id?: number) => {
+  const invalidate = (id?: number, result?: any) => {
+    if (result) setRunning(result)
     if (id) { setOpen(id); playShow() }
     qc.invalidateQueries({ queryKey: ['shows'] })
     qc.invalidateQueries({ queryKey: ['roster'] })
@@ -55,13 +65,13 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
   const runAuto = useMutation({
     mutationFn: () => runShow(brandId, `${brand?.name} #${nextNumber(brandId)}`, matches,
                               false, undefined, 'tv'),
-    onSuccess: (r) => { setErr(null); invalidate(r.show_id) },
+    onSuccess: (r) => { setErr(null); invalidate(r.show_id, r) },
     onError: (e: Error) => setErr(e.message),
   })
 
   const runAI = useMutation({
     mutationFn: () => aiRivalBook(brandId, matches, true, `${brand?.name} #${nextNumber(brandId)}`),
-    onSuccess: (r) => { setErr(null); invalidate(r.show?.show_id) },
+    onSuccess: (r) => { setErr(null); invalidate(r.show?.show_id, r.show) },
     onError: (e: Error) => setErr(e.message),
   })
 
@@ -69,7 +79,7 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
   // hand-booked, so the count comes from the format rather than the picker.
   const runPPV = useMutation({
     mutationFn: () => runShow(brandId, calendar!.ppv!, 6, true, calendar!.ppv!, 'ppv'),
-    onSuccess: (r) => { setErr(null); invalidate(r.show_id) },
+    onSuccess: (r) => { setErr(null); invalidate(r.show_id, r) },
     onError: (e: Error) => setErr(e.message),
   })
 
@@ -184,7 +194,7 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
         {shows.map((s) => {
           const c = brands.find((b) => b.brand_id === s.brand_id)?.colour
           return (
-            <button key={s.id} onClick={() => setOpen(s.id)}
+            <button key={s.id} onClick={() => { setRunning(null); setOpen(s.id) }}
               className={`w-full text-left px-4 py-2.5 border-b border-edge/50 transition-colors
                           ${open === s.id ? 'bg-gold/10' : 'hover:bg-panel'}`}
               style={open === s.id ? undefined : c ? { boxShadow: `inset 3px 0 0 ${c}` } : undefined}>
@@ -209,9 +219,15 @@ export default function ShowsTab({ roster }: { roster: RosterRow[] }) {
       </div>
 
       {/* ---------------- booking screen / show detail / calendar ---------------- */}
-      {mode === 'manual' ? (
+      {/* A show just run is WALKED THROUGH before the table appears: the payoff
+          for a night's booking should not arrive as a spreadsheet. Skippable,
+          and it takes precedence over everything because it is the thing the GM
+          just asked for. */}
+      {running ? (
+        <ShowRunner result={running} onFinish={() => setRunning(null)} />
+      ) : mode === 'manual' ? (
         <BookingScreen brandId={brandId} brand={brand} calendar={calendar}
-          onBooked={(id) => invalidate(id)} />
+          onBooked={(id, result) => invalidate(id, result)} />
       ) : (
       <div className="flex-1 overflow-auto p-6">
         {!detail && (
@@ -462,7 +478,14 @@ function Revise({ m, sides, onDone }: { m: any; sides: any[]; onDone: () => void
     onSuccess: () => { setErr(null); onDone() },
     onError: (e: Error) => setErr(e.message),
   })
-  const busy = winner.isPending || stars.isPending
+  // Puts the match back exactly as the sim left it, from the revision log —
+  // which is why every override records its FROM value and not just its TO.
+  const undo = useMutation({
+    mutationFn: () => undoRevision(m.id),
+    onSuccess: () => { setErr(null); onDone() },
+    onError: (e: Error) => setErr(e.message),
+  })
+  const busy = winner.isPending || stars.isPending || undo.isPending
 
   if (!open) {
     return (
@@ -520,6 +543,13 @@ function Revise({ m, sides, onDone }: { m: any; sides: any[]; onDone: () => void
           </button>
         ))}
       </div>
+
+      {!!m.revisions?.length && (
+        <button disabled={busy} onClick={() => undo.mutate()}
+          className="text-[10px] text-slate-400 hover:text-gold mt-2 disabled:opacity-40">
+          ↩ undo — put the simulated result back
+        </button>
+      )}
 
       {err && <p className="text-[10px] text-blood mt-1.5">{err}</p>}
       <p className="text-[9px] text-slate-600 mt-2 leading-snug">

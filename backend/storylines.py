@@ -452,3 +452,143 @@ def settle_stale(con: sqlite3.Connection) -> list[dict]:
             closed.append({"feud_id": f["id"], "winner": None})
     con.commit()
     return closed
+
+
+# ---------------------------------------------------------------- suggestions
+#
+# WHAT WAS MISSING. The locker room proposes requests and the crowd proposes
+# turns, but nothing proposed STORIES — so a roster could sit there with fifteen
+# unbooked women and no rivalries, and the game would never once say "these two
+# should be feuding". Which is the single most useful thing it could say, because
+# a rivalry is the best reason to put two people in a ring and everything
+# downstream (the pre-booked card, heat, the ratings war) runs on having one.
+#
+# Suggestions only, like everything else: this returns pairings with reasons and
+# the GM opens whichever she likes.
+
+# Nobody needs a fourth storyline. Above this she is spread too thin for another
+# one to mean anything.
+MAX_STORIES_EACH = 2
+
+# How close in standing two people should be for a rivalry to look competitive.
+# Wide enough to allow an upset story, tight enough to avoid a squash.
+RIVAL_GAP = 14
+
+
+def suggestions(con: sqlite3.Connection, brand_id: str | None = None,
+                limit: int = 6) -> list[dict]:
+    """Pairings worth a story, with the reason and the kind that fits.
+
+    Ranked so the most valuable suggestion is first: two over women with nothing
+    to do is a bigger miss than two enhancement talents with nothing to do.
+    """
+    st = con.execute("SELECT * FROM game_state WHERE id=1").fetchone()
+    if not st:
+        return []
+    season = st["season_year"]
+    sql = """SELECT c.wrestler_id, c.brand_id, c.role FROM contract c
+             WHERE c.terminated_on IS NULL AND c.start_year<=? AND c.end_year>=?"""
+    args: list = [season, season]
+    if brand_id:
+        sql += " AND c.brand_id=?"
+        args.append(brand_id)
+
+    ach = game.achievement_inputs(con)
+    people: list[dict] = []
+    for r in con.execute(sql, tuple(args)):
+        try:
+            eff = game.effective_attributes(con, r["wrestler_id"], ach.get(r["wrestler_id"]))
+        except ValueError:
+            continue
+        people.append({
+            "id": r["wrestler_id"], "brand_id": r["brand_id"],
+            "name": game._wname(con, r["wrestler_id"]),
+            "overall": eff["overall"], "popularity": eff["popularity"],
+            "alignment": eff.get("alignment") or "face",
+            "age": eff.get("age") or 30,
+            "working_role": eff.get("working_role", "wrestler"),
+        })
+
+    # How many stories each is already in — the cap that stops a suggestion
+    # engine from proposing a fifth feud for the same woman.
+    running: dict[int, int] = {}
+    existing: set[frozenset] = set()
+    for f in con.execute("SELECT * FROM feud WHERE status='active'"):
+        existing.add(frozenset({f["a_id"], f["b_id"]}))
+        for w in (f["a_id"], f["b_id"]):
+            running[w] = running.get(w, 0) + 1
+
+    out: list[dict] = []
+    for i, a in enumerate(people):
+        if running.get(a["id"], 0) >= MAX_STORIES_EACH:
+            continue
+        for b in people[i + 1:]:
+            if running.get(b["id"], 0) >= MAX_STORIES_EACH:
+                continue
+            if frozenset({a["id"], b["id"]}) in existing:
+                continue
+            if a["brand_id"] != b["brand_id"]:
+                continue          # a story needs them on the same show
+            s = _score_pair(a, b)
+            if s:
+                out.append(s)
+
+    out.sort(key=lambda x: -x["score"])
+    return out[:limit]
+
+
+def _score_pair(a: dict, b: dict) -> dict | None:
+    """Why these two, and what kind of story. None if there is no case."""
+    gap = abs(a["overall"] - b["overall"])
+    pop = (a["popularity"] + b["popularity"]) / 2
+    opposed = a["alignment"] != b["alignment"]
+    mgr = "manager" in (a["working_role"], b["working_role"])
+    both_mgr = a["working_role"] == b["working_role"] == "manager"
+
+    # A manager and a wrestler is a ROMANCE waiting to happen — it is the pairing
+    # the kind exists for, and it needs no ring time from her at all.
+    if mgr and not both_mgr:
+        return {"a_id": a["id"], "b_id": b["id"], "a_name": a["name"],
+                "b_name": b["name"], "kind": "romance",
+                "score": 40 + pop * 2.0,
+                "reason": f"{a['name']} and {b['name']} — a manager and the woman she "
+                          f"stands beside. A romance builds both of them without "
+                          f"needing a single match.",
+                "brand_id": a["brand_id"]}
+    if both_mgr:
+        return None               # two managers with no wrestlers is not a story
+
+    # A big age gap with a real ability gap is a MENTORSHIP: the veteran has
+    # something to teach and the student measurably gains from it.
+    if abs(a["age"] - b["age"]) >= 9 and gap >= 8:
+        vet, kid = (a, b) if a["age"] > b["age"] else (b, a)
+        return {"a_id": vet["id"], "b_id": kid["id"], "a_name": vet["name"],
+                "b_name": kid["name"], "kind": "mentorship",
+                "score": 30 + kid["popularity"] * 1.2,
+                "reason": f"{vet['name']} is {vet['age']} and {kid['name']} is "
+                          f"{kid['age']}. A mentorship grows the student's Wrestling "
+                          f"faster while it lasts — and the turn on the teacher later "
+                          f"writes itself.",
+                "brand_id": a["brand_id"]}
+
+    # Same alignment and similar level: they belong on the SAME side.
+    if not opposed and gap <= RIVAL_GAP:
+        return {"a_id": a["id"], "b_id": b["id"], "a_name": a["name"],
+                "b_name": b["name"], "kind": "alliance",
+                "score": 20 + pop * 1.4,
+                "reason": f"{a['name']} and {b['name']} are both "
+                          f"{a['alignment']}s at a similar level. An alliance gives "
+                          f"you tag matches now and a betrayal to spend later.",
+                "brand_id": a["brand_id"]}
+
+    # Opposite alignments, close in level: the classic rivalry.
+    if opposed and gap <= RIVAL_GAP:
+        return {"a_id": a["id"], "b_id": b["id"], "a_name": a["name"],
+                "b_name": b["name"], "kind": "rivalry",
+                "score": 45 + pop * 2.6 - gap * 0.5,
+                "reason": f"{a['name']} ({a['alignment']}) against {b['name']} "
+                          f"({b['alignment']}), and only {gap} points between them. "
+                          f"Good against evil at an even level is the easiest story "
+                          f"there is.",
+                "brand_id": a["brand_id"]}
+    return None

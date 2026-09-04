@@ -440,6 +440,18 @@ def expire_stale(con: sqlite3.Connection) -> dict:
 
 # ---------------------------------------------------------------- resolution
 
+def _remember(con: sqlite3.Connection, rid: int, kind: str, payload: dict) -> None:
+    """Write down what a grant is about to change, so it can be put back.
+
+    Recorded BEFORE the change, because afterwards the old value is gone: a
+    raise overwrites the salary and a turn overwrites the alignment. Nothing
+    reconstructs those from the request row alone.
+    """
+    con.execute(
+        "INSERT OR REPLACE INTO request_undo (request_id, kind, payload, created_on) "
+        "VALUES (?,?,?,?)", (rid, kind, json.dumps(payload), _today(con)))
+
+
 def _grant(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
     """Actually do the thing she asked for. Every branch has a real cost."""
     wid, kind = r["wrestler_id"], r["kind"]
@@ -460,6 +472,8 @@ def _grant(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
             raise game.SigningError(
                 f"{fin['name']} has ${fin['available']:,} of cap space and this raise "
                 f"costs ${rise:,}. Free up money or turn her down.")
+        _remember(con, r["id"], kind,
+                  {"contract_id": c["id"], "annual_value": c["annual_value"]})
         con.execute("UPDATE contract SET annual_value=? WHERE id=?", (new, c["id"]))
         game.log_event(con, "contract",
                        f"{name} gets a raise — ${c['annual_value']:,} → ${new:,}.",
@@ -471,6 +485,10 @@ def _grant(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
         tid = int(r["ask_value"] or 0)
         if not tid:
             raise game.SigningError("no title recorded on this request")
+        prev = con.execute("SELECT wrestler_id FROM contender_lock WHERE title_id=?",
+                           (tid,)).fetchone()
+        _remember(con, r["id"], kind,
+                  {"title_id": tid, "previous_lock": prev["wrestler_id"] if prev else None})
         rankings.lock_contender(con, tid, wid)
         t = con.execute("SELECT name FROM game_title WHERE id=?", (tid,)).fetchone()
         game.log_event(con, "title",
@@ -491,6 +509,10 @@ def _grant(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
     elif kind == "time_off":
         weeks = int(r["ask_value"] or REST_WEEKS)
         until = (date.fromisoformat(today) + timedelta(weeks=weeks)).isoformat()
+        prev = con.execute("SELECT rested_until FROM wrestler_state WHERE wrestler_id=?",
+                           (wid,)).fetchone()
+        _remember(con, r["id"], kind,
+                  {"rested_until": prev["rested_until"] if prev else None})
         con.execute("UPDATE wrestler_state SET rested_until=? WHERE wrestler_id=?",
                     (until, wid))
         game.log_event(con, "request", f"{name} is given {weeks} weeks off.",
@@ -504,7 +526,9 @@ def _grant(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
         if not tgt:
             raise game.SigningError("nobody suitable on her brand to feud with")
         if not game.feud_between(con, wid, tgt):
-            game.create_feud(con, wid, tgt, r["brand_id"], "She asked for this one.")
+            created = game.create_feud(con, wid, tgt, r["brand_id"],
+                                       "She asked for this one.")
+            _remember(con, r["id"], kind, {"feud_id": created["id"]})
         out.update({"opponent": tgt, "opponent_name": game._wname(con, tgt)})
 
     elif kind == "turn":
@@ -512,6 +536,10 @@ def _grant(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
         rp = crowd.recent_pop(con, wid, limit=8)
         to = rp["drifting"] or ("heel" if (game.effective_attributes(con, wid)
                                            .get("alignment") == "face") else "face")
+        prev = con.execute("SELECT alignment FROM attribute_override WHERE wrestler_id=?",
+                           (wid,)).fetchone()
+        _remember(con, r["id"], kind,
+                  {"alignment": prev["alignment"] if prev else None})
         con.execute(
             """INSERT INTO attribute_override (wrestler_id, alignment, updated_at)
                VALUES (?,?,?) ON CONFLICT(wrestler_id) DO UPDATE SET
@@ -619,6 +647,85 @@ def resolve(con: sqlite3.Connection, rid: int, grant: bool,
     return {"id": rid, "status": "granted", "morale_change": gain, "detail": detail}
 
 
+# ---------------------------------------------------------------- undo
+
+# What can be taken back, and what cannot. A trade and a release move a person;
+# unwinding those would mean re-signing somebody the other brand may no longer
+# have room for, or resurrecting a contract that has been superseded. Both are
+# better handled by the trade and free-agent screens that already exist, so undo
+# is honest about its edges rather than pretending.
+UNDOABLE = ("raise", "title_shot", "time_off", "storyline", "turn", "push")
+
+NOT_UNDOABLE_WHY = {
+    "trade": "She has already moved brands. Trade her back from the Trades screen.",
+    "release": "She is a free agent now. Re-sign her from Free Agents.",
+}
+
+
+def can_undo(con: sqlite3.Connection, rid: int) -> tuple[bool, str]:
+    r = con.execute("SELECT * FROM wrestler_request WHERE id=?", (rid,)).fetchone()
+    if not r:
+        return False, "no such request"
+    if r["status"] != "granted":
+        return False, f"nothing to undo — this was {r['status']}"
+    if r["kind"] in NOT_UNDOABLE_WHY:
+        return False, NOT_UNDOABLE_WHY[r["kind"]]
+    if r["kind"] not in UNDOABLE:
+        return False, "this kind cannot be taken back"
+    return True, "can be undone"
+
+
+def undo(con: sqlite3.Connection, rid: int) -> dict:
+    """Take back a granted request: put the change back and reopen the ask.
+
+    Reopening rather than deleting is deliberate. She asked for something and
+    the answer is now unresolved again, which is the truth — silently dropping
+    the request would let the GM undo a grant and never have to answer.
+    """
+    ok, why = can_undo(con, rid)
+    if not ok:
+        raise game.SigningError(why)
+    r = con.execute("SELECT * FROM wrestler_request WHERE id=?", (rid,)).fetchone()
+    u = con.execute("SELECT * FROM request_undo WHERE request_id=?", (rid,)).fetchone()
+    data = json.loads(u["payload"]) if u else {}
+    wid, kind = r["wrestler_id"], r["kind"]
+    name = game._wname(con, wid)
+
+    if kind == "raise" and data.get("contract_id"):
+        con.execute("UPDATE contract SET annual_value=? WHERE id=?",
+                    (data["annual_value"], data["contract_id"]))
+    elif kind == "title_shot" and data.get("title_id"):
+        import rankings
+        rankings.lock_contender(con, data["title_id"], data.get("previous_lock"))
+    elif kind == "time_off":
+        con.execute("UPDATE wrestler_state SET rested_until=? WHERE wrestler_id=?",
+                    (data.get("rested_until"), wid))
+    elif kind == "storyline" and data.get("feud_id"):
+        # Settled rather than deleted: it happened, and the beats are history.
+        game.settle_feud(con, data["feud_id"])
+    elif kind == "turn":
+        con.execute(
+            """INSERT INTO attribute_override (wrestler_id, alignment, updated_at)
+               VALUES (?,?,?) ON CONFLICT(wrestler_id) DO UPDATE SET
+                 alignment=excluded.alignment, updated_at=excluded.updated_at""",
+            (wid, data.get("alignment"), game.now_iso()))
+    elif kind == "push":
+        game.set_setting(con, f"promise:push:{wid}", None)
+
+    # Take back the goodwill the grant bought, and put the request back in the
+    # in-tray at the severity she asked at.
+    con.execute("UPDATE wrestler_state SET morale = MAX(0, MIN(100, morale - ?)) "
+                "WHERE wrestler_id=?", (GRANT_MORALE[r["severity"]], wid))
+    con.execute("UPDATE wrestler_request SET status='open', resolved_on=NULL WHERE id=?",
+                (rid,))
+    con.execute("DELETE FROM request_undo WHERE request_id=?", (rid,))
+    game.log_event(con, "request",
+                   f"{name}'s {KINDS[kind]['label'].lower()} was taken back — "
+                   f"she is asking again.", r["brand_id"], "↩")
+    con.commit()
+    return {"id": rid, "status": "open", "undone": kind}
+
+
 # ---------------------------------------------------------------- forcing
 
 def force_moves(con: sqlite3.Connection) -> list[dict]:
@@ -724,13 +831,23 @@ def open_requests(con: sqlite3.Connection, brand_id: str | None = None) -> list[
 
 
 def history(con: sqlite3.Connection, limit: int = 60) -> list[dict]:
-    return [dict(r) for r in con.execute(
+    out = []
+    for r in con.execute(
         """SELECT r.*, COALESCE(o.display_name, w.name) name
              FROM wrestler_request r
              JOIN wrestler w ON w.id=r.wrestler_id
              LEFT JOIN attribute_override o ON o.wrestler_id=r.wrestler_id
             WHERE r.status<>'open'
-            ORDER BY r.resolved_on DESC, r.id DESC LIMIT ?""", (limit,))]
+            ORDER BY r.resolved_on DESC, r.id DESC LIMIT ?""", (limit,)):
+        d = dict(r)
+        k = KINDS.get(d["kind"], {})
+        d["label"] = k.get("label", d["kind"])
+        d["icon"] = k.get("icon", "🗣")
+        ok, why = can_undo(con, d["id"])
+        d["can_undo"] = ok
+        d["undo_note"] = why
+        out.append(d)
+    return out
 
 
 def forced(con: sqlite3.Connection) -> list[dict]:

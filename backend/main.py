@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "harvester"))
 
 import ai  # noqa: E402
 import attributes as A  # noqa: E402
+import advice  # noqa: E402
 import autobook  # noqa: E402
 import booking  # noqa: E402
 import brandwar  # noqa: E402
@@ -40,6 +41,7 @@ import morale as morale_mod  # noqa: E402
 import promos as PR  # noqa: E402
 import revise  # noqa: E402
 import ringside  # noqa: E402
+import season  # noqa: E402
 import storylines  # noqa: E402
 import turns  # noqa: E402
 import rankings  # noqa: E402
@@ -2657,5 +2659,90 @@ def sour_storyline(fid: int, body: SourBody) -> dict:
         return storylines.sour(c, fid, body.note)
     except game.SigningError as e:
         raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+# ============================================================ card review
+#
+# ADVISORY, never blocking. The sim already refuses an ILLEGAL card; this reads
+# a legal one the way somebody who has booked before would read it, and moves
+# the feedback from after the show to before it.
+
+class ReviewBody(BaseModel):
+    brand_id: str
+    card: list[dict] = []
+    promos: list[dict] = []
+    kind: str = "tv"
+
+
+@app.post("/api/booking/review")
+def booking_review(body: ReviewBody) -> dict:
+    """What is wrong with this card. Nothing here can stop it being run."""
+    c = conn()
+    try:
+        return advice.review(c, body.brand_id, body.card, body.promos, body.kind)
+    finally:
+        c.close()
+
+
+# ============================================================ undo
+
+@app.post("/api/matches/{match_id}/undo")
+def undo_revision(match_id: int) -> dict:
+    """Put a match back exactly as the simulation left it."""
+    c = conn()
+    try:
+        return revise.undo(c, match_id)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+@app.post("/api/requests/{rid}/undo")
+def undo_request(rid: int) -> dict:
+    """Take back a granted request. It goes back in the in-tray, still asking."""
+    c = conn()
+    try:
+        return demands.undo(c, rid)
+    except game.SigningError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        c.close()
+
+
+# ============================================================ storyline ideas
+
+@app.get("/api/storyline-suggestions")
+def storyline_suggestions(brand_id: str | None = None, limit: int = 6) -> list[dict]:
+    """Pairings worth a story, with the reason and the kind that fits.
+
+    Suggestions only — the GM opens whichever she likes, or none.
+    """
+    c = conn()
+    try:
+        return storylines.suggestions(c, brand_id, limit)
+    finally:
+        c.close()
+
+
+# ============================================================ season summary
+
+@app.get("/api/seasons")
+def season_list() -> list[int]:
+    c = conn()
+    try:
+        return season.seasons(c)
+    finally:
+        c.close()
+
+
+@app.get("/api/season/{year}")
+def season_summary(year: int) -> dict:
+    """What the year was. Read-only and entirely derived from the save."""
+    c = conn()
+    try:
+        return season.summary(c, year)
     finally:
         c.close()

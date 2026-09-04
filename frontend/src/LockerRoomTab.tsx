@@ -15,7 +15,7 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchLockerRoom, resolveRequest, generateRequests, resolveTurn, scanTurns,
-  restWrestler, clearRest, fetchBrands,
+  restWrestler, clearRest, fetchBrands, undoRequest,
   type WrestlerRequest, type MoraleSnapshot, type MedicalRow, type TurnSuggestion,
 } from './api'
 
@@ -121,7 +121,7 @@ export default function LockerRoomTab() {
         <div className="space-y-5 min-w-0">
           <Medical med={data.medical} onDone={invalidate} onErr={setErr} />
           <Forced forced={data.forced} />
-          <History rows={data.history} />
+          <History rows={data.history} onDone={invalidate} onErr={setErr} />
         </div>
       </div>
     </div>
@@ -528,24 +528,48 @@ function Forced({ forced }: { forced: { id: number; name: string; kind: string; 
 
 // ----------------------------------------------------------------- history
 
-function History({ rows }: { rows: (WrestlerRequest & { resolved_on: string })[] }) {
+function History({ rows, onDone, onErr }: {
+  rows: (WrestlerRequest & { resolved_on: string; can_undo?: boolean; undo_note?: string })[]
+  onDone: () => void; onErr: (s: string) => void
+}) {
   if (!rows.length) return null
   const style = (s: string) =>
     s === 'granted' ? '#34d399' : s === 'denied' ? '#f87171' : '#64748b'
   return (
-    <Section title="What you decided" note="The record the room remembers.">
+    <Section title="What you decided"
+      note="The record the room remembers. A grant can be taken back — she goes straight back to asking.">
       <div className="space-y-0.5">
-        {rows.map((r) => (
-          <div key={r.id} className="flex items-baseline justify-between gap-2 text-[11px] px-1 py-0.5">
-            <span className="truncate text-slate-400">
-              {r.name} — {(r.label ?? r.kind).toLowerCase()}
-            </span>
-            <span className="label text-[8px] shrink-0" style={{ color: style(r.status) }}>
-              {r.status}
-            </span>
-          </div>
-        ))}
+        {rows.map((r) => <HistoryRow key={r.id} r={r} colour={style(r.status)}
+          onDone={onDone} onErr={onErr} />)}
       </div>
     </Section>
+  )
+}
+
+function HistoryRow({ r, colour, onDone, onErr }: {
+  r: WrestlerRequest & { can_undo?: boolean; undo_note?: string }
+  colour: string; onDone: () => void; onErr: (s: string) => void
+}) {
+  const undo = useMutation({
+    mutationFn: () => undoRequest(r.id),
+    onSuccess: onDone,
+    onError: (e: Error) => onErr(e.message),
+  })
+  return (
+    <div className="flex items-baseline justify-between gap-2 text-[11px] px-1 py-0.5">
+      <span className="truncate text-slate-400">
+        {r.name} — {(r.label ?? r.kind).toLowerCase()}
+      </span>
+      <span className="flex items-baseline gap-1.5 shrink-0">
+        {r.can_undo && (
+          <button disabled={undo.isPending} onClick={() => undo.mutate()}
+            title="Put the change back. She will be asking again."
+            className="text-[9px] text-slate-500 hover:text-gold disabled:opacity-40">
+            {undo.isPending ? '…' : '↩ undo'}
+          </button>
+        )}
+        <span className="label text-[8px]" style={{ color: colour }}>{r.status}</span>
+      </span>
+    </div>
   )
 }

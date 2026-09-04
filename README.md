@@ -42,6 +42,8 @@ asks the AI to decide a match.
 | `backend/medical.py` | Injury severity, relapse risk, deliberate rest |
 | `backend/ringside.py` | What a manager at ringside is worth to a match |
 | `backend/revise.py` | Overruling a result, and putting back what it paid out |
+| `backend/advice.py` | What is wrong with a card, before you run it |
+| `backend/season.py` | The year in one page. Read-only, entirely derived |
 | `frontend/` | Vite + React UI |
 | `harvester/` | Roster construction and the attribute engine |
 | `data/gm2000.db` | The save: the seeded, hand-tuned roster |
@@ -51,6 +53,7 @@ asks the AI to decide a match.
 | `test_shows.py` | The show format, match types and promos, end to end |
 | `test_locker.py` | Morale, requests, forced moves, storylines, the ratings war |
 | `test_control.py` | Result overrides, ringside managers, storyline kinds |
+| `test_qol.py` | The save write-barrier, card review, undo, ideas, the season |
 
 ## The show format
 
@@ -274,6 +277,57 @@ promo slots, six on a pay-per-view — and you fill it. Booking a card from
 scratch is the game, so the pre-booked suggestion is a button you press
 (*Pre-book it for me*) rather than something that has already happened to your
 card. The choice is remembered.
+
+## Show night
+
+Confirming a card walks you through it: each press reveals the next segment with
+its result, its rating and how the crowd took it. The night's rating is withheld
+until the end, because that is what it is — the verdict on the whole card, not a
+number that was already true when the opener started. Skippable, and it can be
+re-read as a table any time.
+
+## The card tells you what is wrong with it
+
+The sim refuses an **illegal** card — a half-filled Fatal 4-Way, somebody booked
+twice, a woman on the injury shelf. Far more common is a card that is perfectly
+legal and simply bad, and the review catches those before you run it:
+
+- the same match for the third week running
+- somebody who has worked every show, or who is risky to book at all
+- a title match with no rivalry behind it
+- a card with no face-vs-heel conflict anywhere
+- an opener with more star power than the main event
+- a blow-off you are building to, given away early
+- a romance booked against itself
+- a rivalry at 90 heat left off the card entirely
+
+Every finding names a fix. It is **advice, not a gate** — confirm anyway if you
+disagree, because you are the one booking the show.
+
+## Undo
+
+A result override can be put back exactly as the simulation left it — the
+revision log records the *from* value, so undo replays it rather than guessing.
+A granted request can be taken back too: the change is reversed, the goodwill is
+taken back, and she goes back into the in-tray still asking. A trade or a release
+cannot be undone, and the screen says where to handle those instead rather than
+pretending.
+
+## Stories you are missing
+
+The locker room proposes requests and the crowd proposes turns; nothing proposed
+**stories**. Press *Ideas* and the engine reads the roster for pairings worth
+opening — opposite alignments at a similar level for a rivalry, a manager and the
+woman she stands beside for a romance, a big age-and-ability gap for a
+mentorship — each with the reason, one click to start. Capped at two storylines
+per person, so it cannot bury a roster in feuds.
+
+## The season
+
+One page for "what happened in 2003?": match of the year, story of the year,
+biggest rating and buyrate, who broke out, the workhorse, every title change,
+turns, walkouts and awards. Entirely read-only and derived from the save's own
+records, so it can never disagree with the data behind it.
 
 ## Wrestler, manager, or both
 

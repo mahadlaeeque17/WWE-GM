@@ -900,6 +900,12 @@ def run_show(
         "is_ppv": is_ppv, "ppv_name": ppv_name, "matches": results,
         "promos": promo_results, "ledger": ledger, "tv": tv,
         "crowd": crowd.show_reactions(con, show_id),
+        # Every id that appeared, mapped to a name. The result is otherwise all
+        # ids, and a caller wanting to SHOW the card would have to join it back
+        # against the roster — which is a second source of truth for a name.
+        "names": {w: game._wname(con, w)
+                  for w in sorted(set(appeared) | {m for p in promo_results
+                                                   for m in p["wrestler_ids"]})},
     }
 
 

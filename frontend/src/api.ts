@@ -976,6 +976,16 @@ export interface StoreStatus {
   persisted: number | null
   error: string | null
   db_bytes: number
+  /**
+   * THE WRITE BARRIER. False means this boot never downloaded the real save, so
+   * the app is running on the bundled seed and is deliberately refusing to push
+   * it up over the stored one. Look here first if a save appears to have reset
+   * itself — see backend/store.py.
+   */
+  writable: boolean
+  writable_detail: string
+  hydrated_ok: boolean
+  startup?: string[]
 }
 
 export const fetchStoreStatus = () => req<StoreStatus>('/api/store/status')
@@ -1296,3 +1306,98 @@ export const sourStoryline = (fid: number, note?: string) =>
   req<any>(`/api/storylines/${fid}/sour`, {
     method: 'POST', body: JSON.stringify({ note: note ?? null }),
   })
+
+// ========================================================== card review
+//
+// ADVISORY, never blocking. The sim already refuses an ILLEGAL card; this reads
+// a legal one the way somebody who has booked before would, and moves the
+// feedback from after the show to before it.
+
+export interface Finding {
+  level: 'problem' | 'note'
+  key: string
+  text: string
+  fix: string | null
+}
+export interface CardReview {
+  findings: Finding[]
+  counts: { problem?: number; note?: number }
+  verdict: string
+}
+export const reviewCard = (
+  brand_id: string, card: CardMatch[], promos: CardPromo[] = [], kind = 'tv',
+) =>
+  req<CardReview>('/api/booking/review', {
+    method: 'POST',
+    body: JSON.stringify({
+      brand_id, kind,
+      card: card.map((m) => ({
+        teams: m.teams, title_id: m.title_id, match_type: m.match_type ?? 'singles',
+      })),
+      promos: promos.map((p) => ({ kind: p.kind, wrestler_ids: p.wrestler_ids })),
+    }),
+  })
+
+// ================================================================= undo
+
+/** Put a match back exactly as the simulation left it. */
+export const undoRevision = (matchId: number) =>
+  req<{ match_id: number; reverted: string[] }>(`/api/matches/${matchId}/undo`,
+    { method: 'POST' })
+/** Take back a granted request. It goes back in the in-tray, still asking. */
+export const undoRequest = (rid: number) =>
+  req<any>(`/api/requests/${rid}/undo`, { method: 'POST' })
+
+// ==================================================== storyline suggestions
+
+export interface StorylineIdea {
+  a_id: number; b_id: number; a_name: string; b_name: string
+  kind: string; score: number; reason: string
+  brand_id: string | null
+}
+export const fetchStorylineIdeas = (brand_id?: string, limit = 6) =>
+  req<StorylineIdea[]>(
+    `/api/storyline-suggestions?limit=${limit}${brand_id ? `&brand_id=${brand_id}` : ''}`)
+
+// ======================================================== season summary
+
+export interface SeasonSummary {
+  season_year: number
+  ran: boolean
+  headline: string
+  shows?: number; ppvs?: number; avg_show_rating?: number | null
+  attendance?: number; matches?: number; avg_match_quality?: number | null
+  best_match?: {
+    id: number; quality: number; stars: number; show_name: string
+    held_on: string; is_ppv: number; match_type: string | null
+    stipulation: string | null; wrestlers: string[]
+  } | null
+  best_show?: { id: number; name: string; held_on: string; rating: number
+                tv_rating: number | null; buyrate: number | null
+                is_ppv: number; attendance: number | null } | null
+  biggest_tv?: { id: number; name: string; held_on: string; tv_rating: number } | null
+  biggest_ppv?: { id: number; name: string; held_on: string; buyrate: number } | null
+  feud_of_the_year?: {
+    id: number; a_name: string; b_name: string; heat: number
+    kind: string; kind_label: string; was_kind: string | null
+    beats: number; matches: number
+    series: { a_wins: number; b_wins: number; draws: number }
+  } | null
+  title_changes?: { title_id: number; name: string; short_name: string | null
+                    tier: string; name_of: string; won_on: string }[]
+  champions?: { name: string; short_name: string | null; tier: string
+                name_of: string | null; won_on: string | null }[]
+  breakout?: { wrestler_id: number; name: string; gained: number
+               weeks_top10: number } | null
+  workhorse?: { wrestler_id: number; name: string; matches: number
+                avg_quality: number | null } | null
+  turns?: { wrestler_id: number; name: string; from_align: string
+            to_align: string; trigger: string }[]
+  forced_moves?: { wrestler_id: number; name: string; kind: string
+                   from_brand: string | null; to_brand: string | null
+                   on_date: string; reason: string }[]
+  awards?: { kind: string; name: string | null; detail: string | null }[]
+}
+export const fetchSeasons = () => req<number[]>('/api/seasons')
+export const fetchSeasonSummary = (year: number) =>
+  req<SeasonSummary>(`/api/season/${year}`)

@@ -180,6 +180,15 @@ CREATE TABLE IF NOT EXISTS wrestler_request (
     times_asked INTEGER NOT NULL DEFAULT 1
 );
 -- Something a wrestler did that the GM did not choose: a forced trade, a walkout.
+-- What a GRANTED request changed, so it can be put back. Recorded at grant
+-- time because the old value is not recoverable afterwards: a raise overwrites
+-- the salary, a turn overwrites the alignment.
+CREATE TABLE IF NOT EXISTS request_undo (
+    request_id INTEGER PRIMARY KEY REFERENCES wrestler_request(id),
+    kind       TEXT NOT NULL,
+    payload    TEXT NOT NULL,       -- JSON: whatever putting it back needs
+    created_on TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS forced_move (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     wrestler_id INTEGER NOT NULL REFERENCES wrestler(id),

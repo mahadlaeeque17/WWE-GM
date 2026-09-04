@@ -285,6 +285,48 @@ def _rebeat(con, match_id, d, winner_team, finish, sides) -> None:
         break
 
 
+def undo(con: sqlite3.Connection, match_id: int) -> dict:
+    """Put a match back exactly as the simulation left it.
+
+    Reads the revision log backwards and replays each entry in reverse, which is
+    why every override records its FROM value rather than only its TO. That log
+    was already there for the record; making it the undo source means there is
+    one history rather than a history plus a separate snapshot that could
+    disagree with it.
+
+    Only the winner and the stars are reversible, and that is not a shortcut: a
+    title move and a storyline beat are both DERIVED from those two, so putting
+    the winner back re-derives them through the same code path that set them.
+    """
+    revs = revisions(con, match_id)
+    if not revs:
+        raise game.SigningError("this result has not been overruled")
+    # Oldest FROM value is what the sim originally produced; anything in between
+    # was the GM changing her mind, and undo means all the way back.
+    first_winner = next((r for r in revs if r["field"] == "winner"), None)
+    first_stars = next((r for r in revs if r["field"] == "stars"), None)
+    out: dict = {"match_id": match_id, "reverted": []}
+
+    if first_stars is not None:
+        set_stars(con, match_id, float(first_stars["from_value"]))
+        out["reverted"].append(f"stars back to {first_stars['from_value']}")
+    if first_winner is not None:
+        team = (None if first_winner["from_value"] in ("None", "", None)
+                else int(first_winner["from_value"]))
+        first_finish = next((r for r in revs if r["field"] == "finish"), None)
+        set_winner(con, match_id, team,
+                   first_finish["from_value"] if first_finish else None)
+        out["reverted"].append("winner back to the simulated result")
+
+    # The log is cleared: the match is as the sim left it, so claiming it was
+    # overruled would be false, and the ✎ marker would be lying.
+    con.execute("DELETE FROM match_revision WHERE match_id=?", (match_id,))
+    game.log_event(con, "revision",
+                   f"Override undone — the simulated result stands.", icon="↩")
+    con.commit()
+    return out
+
+
 def _rescore_show(con: sqlite3.Connection, show_id: int) -> None:
     """Recompute the night's rating from its segments.
 

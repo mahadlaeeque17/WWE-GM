@@ -18,8 +18,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchBookable, fetchBookingCatalogue, fetchSuggestion, runCard, fetchRoster,
-  imageUrl, type CardMatch, type CardPromo, type BrandFinance, type Calendar,
-  type MatchType, type BookableWrestler,
+  reviewCard, imageUrl,
+  type CardMatch, type CardPromo, type BrandFinance, type Calendar,
+  type MatchType, type BookableWrestler, type Finding,
 } from './api'
 import { BrandCrest, PPVBadge, Logo } from './emblems'
 import { usePhotos } from './prefs'
@@ -57,7 +58,12 @@ function Stamina({ value }: { value: number }) {
 
 export default function BookingScreen({
   brandId, brand, calendar, onBooked,
-}: { brandId: string; brand?: BrandFinance; calendar?: Calendar; onBooked: (showId?: number) => void }) {
+}: {
+  brandId: string; brand?: BrandFinance; calendar?: Calendar
+  /** The whole run_show result, so the caller can walk the card segment by
+   *  segment before showing the finished table. */
+  onBooked: (showId?: number, result?: unknown) => void
+}) {
   const qc = useQueryClient()
   const photos = usePhotos()
 
@@ -248,6 +254,20 @@ export default function BookingScreen({
 
   const wanted = suggestion?.wanted ?? { matches: kind === 'ppv' ? 6 : 4, promos: 2 }
 
+  /**
+   * WHAT IS WRONG WITH THIS CARD, before it runs.
+   *
+   * Keyed on the card itself so it re-reads whenever the booking changes. It is
+   * ADVISORY: nothing it says can stop Confirm Booking, because the GM is the
+   * one booking the show. The sim still refuses genuinely illegal cards
+   * separately — this is for the legal ones that are simply bad.
+   */
+  const { data: review } = useQuery({
+    queryKey: ['review', brandId, kind, JSON.stringify(card), JSON.stringify(promos)],
+    queryFn: () => reviewCard(brandId, card, promos, kind),
+    enabled: card.length > 0,
+  })
+
   const confirm = useMutation({
     mutationFn: () => {
       if (!card.length) throw new Error('Book at least one match with every slot filled.')
@@ -265,7 +285,7 @@ export default function BookingScreen({
       return runCard(brandId, nm, card, asPPV, asPPV ? ppvName : undefined, promos)
     },
     onSuccess: (r) => {
-      setErr(null); onBooked(r.show_id); setTouched(false)
+      setErr(null); onBooked(r.show_id, r); setTouched(false)
       qc.invalidateQueries()
     },
     onError: (e: Error) => setErr(e.message),
@@ -564,6 +584,34 @@ export default function BookingScreen({
           <p className="text-[10px] text-slate-600 mt-2 leading-snug">
             The last match is the main event and counts double. Promos count half.
           </p>
+
+          {review && review.findings.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-edge-soft text-left">
+              <div className="label text-[9px] mb-1"
+                style={{ color: review.counts.problem ? '#f87171' : 'var(--color-gold)' }}>
+                {review.verdict}
+              </div>
+              <ul className="space-y-1.5">
+                {review.findings.map((f: Finding, i: number) => (
+                  <li key={i} className="text-[10px] leading-snug">
+                    <span style={{ color: f.level === 'problem' ? '#f87171' : '#94a3b8' }}>
+                      {f.level === 'problem' ? '●' : '○'}
+                    </span>{' '}
+                    <span className="text-slate-300">{f.text}</span>
+                    {f.fix && <span className="text-gold/80"> {f.fix}</span>}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-[9px] text-slate-600 mt-2">
+                Advice, not a gate — confirm anyway if you disagree.
+              </p>
+            </div>
+          )}
+          {review && review.findings.length === 0 && card.length > 0 && (
+            <p className="label text-[9px] text-emerald-400 mt-3 pt-3 border-t border-edge-soft">
+              {review.verdict}
+            </p>
+          )}
 
           {err && <p className="text-[11px] text-blood mt-2 text-left leading-snug">{err}</p>}
 

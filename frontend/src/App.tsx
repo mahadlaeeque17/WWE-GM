@@ -29,6 +29,7 @@ import RankingsTab from './RankingsTab'
 import ProgressionTab from './ProgressionTab'
 import LockerRoomTab from './LockerRoomTab'
 import BrandWarTab from './BrandWarTab'
+import SeasonTab from './SeasonTab'
 
 
 type SortKey = 'overall' | 'value' | 'age' | 'name' | 'morale' | CategoryKey
@@ -280,6 +281,26 @@ export default function App() {
       {!save && tab !== 'images' && (
         <div className="px-6 py-2 bg-gold/10 border-b border-gold/30 text-xs text-gold">
           No active save — click <strong>New game</strong> to create brands, budgets and championships.
+        </div>
+      )}
+
+      {/* THE WRITE BARRIER TRIPPED. Distinct from "not saving" below and more
+          urgent: the store is configured and reachable, but this boot never
+          downloaded the save — so the app is running on the bundled seed and is
+          refusing to push it up over the real one. Play now and it is not being
+          kept; restart and it comes back. Silence here is how a season gets
+          overwritten, so it is the loudest thing on the page. */}
+      {store && store.durable && store.writable === false && (
+        <div className="px-4 py-2 flex items-center gap-3 text-[12px]"
+          style={{ background: 'rgba(255,176,32,0.16)', borderBottom: '1px solid rgba(255,176,32,0.4)' }}>
+          <span className="label text-[10px] px-1.5 py-[3px] rounded bg-gold/25 text-gold shrink-0">
+            SAVE PROTECTED
+          </span>
+          <span className="text-slate-200">
+            Your stored save could not be downloaded this session, so nothing is being
+            written — deliberately, to avoid overwriting it with a blank roster.{' '}
+            <span className="text-slate-400">Reload once the store is reachable.</span>
+          </span>
         </div>
       )}
 
@@ -589,6 +610,7 @@ export default function App() {
       {tab === 'shows' && <ShowsTab roster={roster} />}
       {tab === 'lockerroom' && <LockerRoomTab />}
       {tab === 'brandwar' && <BrandWarTab />}
+      {tab === 'season' && <SeasonTab />}
       {tab === 'images' && <ImagesTab />}
 
       <footer className="border-t border-edge px-6 py-2 text-[11px] text-slate-600 shrink-0">

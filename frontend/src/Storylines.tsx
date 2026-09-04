@@ -18,7 +18,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchStorylines, planBlowoff, fetchCalendar, prettyDate,
   fetchStorylineKinds, sourStoryline, createStoryline, fetchRoster,
-  type Storyline,
+  fetchStorylineIdeas,
+  type Storyline, type StorylineIdea,
 } from './api'
 
 const STAGE_COLOUR: Record<string, string> = {
@@ -69,7 +70,10 @@ export default function Storylines() {
       </p>
       {err && <p className="text-[11px] text-blood mb-2">{err}</p>}
 
-      <NewStoryline onDone={invalidate} onErr={setErr} />
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <NewStoryline onDone={invalidate} onErr={setErr} />
+        <Ideas onDone={invalidate} onErr={setErr} />
+      </div>
 
       {arcs.length === 0
         ? <p className="text-[11px] text-slate-600 max-w-[560px] mt-2">
@@ -82,6 +86,79 @@ export default function Storylines() {
                 onDone={invalidate} onErr={setErr} />
             ))}
           </div>}
+    </div>
+  )
+}
+
+/**
+ * Stories the engine thinks you are missing.
+ *
+ * The locker room proposes requests and the crowd proposes turns, but nothing
+ * proposed STORIES — so a roster could sit there with fifteen unbooked women
+ * and no rivalries and the game would never once say "these two should be
+ * feuding", which is the most useful thing it could say. Suggestions only: each
+ * is one click to open and there is no cost to ignoring them.
+ */
+function Ideas({ onDone, onErr }: { onDone: () => void; onErr: (s: string) => void }) {
+  const [show, setShow] = useState(false)
+  const { data: ideas = [], isFetching, refetch } = useQuery({
+    queryKey: ['storyline-ideas'], queryFn: () => fetchStorylineIdeas(undefined, 6),
+    enabled: show,
+  })
+  const open = useMutation({
+    mutationFn: (i: StorylineIdea) =>
+      createStoryline(i.a_id, i.b_id, i.kind, i.brand_id),
+    onSuccess: () => { refetch(); onDone() },
+    onError: (e: Error) => onErr(e.message),
+  })
+
+  if (!show) {
+    return (
+      <button onClick={() => setShow(true)}
+        className="label text-[9px] px-2 py-1 rounded border border-edge text-slate-400 hover:border-gold/60 hover:text-gold">
+        💡 Ideas
+      </button>
+    )
+  }
+  return (
+    <div className="w-full">
+      <div className="flex items-baseline justify-between gap-2 mb-1.5">
+        <span className="label text-[9px] text-slate-500">
+          Stories you are missing
+        </span>
+        <button onClick={() => setShow(false)}
+          className="text-[10px] text-slate-500 hover:text-slate-300">close</button>
+      </div>
+      {isFetching && <p className="text-[10px] text-slate-600">Reading the roster…</p>}
+      {!isFetching && ideas.length === 0 && (
+        <p className="text-[10px] text-slate-600">
+          Nothing obvious — everybody worth pairing already has something going on.
+        </p>
+      )}
+      <div className="space-y-1.5">
+        {ideas.map((i) => (
+          <div key={`${i.a_id}-${i.b_id}`} className="card p-2.5"
+            style={{ borderLeft: `2px solid ${KIND_COLOUR[i.kind] ?? '#94a3b8'}` }}>
+            <div className="flex items-center gap-2 flex-wrap mb-0.5">
+              <span className="text-[12px] text-slate-200">{i.a_name}</span>
+              <span className="text-slate-600 text-[10px]">
+                {i.kind === 'rivalry' ? 'v' : '&'}
+              </span>
+              <span className="text-[12px] text-slate-200">{i.b_name}</span>
+              <span className="label text-[8px] px-1.5 py-[2px] rounded ml-auto"
+                style={{ background: `${KIND_COLOUR[i.kind] ?? '#94a3b8'}22`,
+                         color: KIND_COLOUR[i.kind] ?? '#94a3b8' }}>
+                {i.kind}
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-500 leading-snug">{i.reason}</p>
+            <button disabled={open.isPending} onClick={() => open.mutate(i)}
+              className="text-[10px] text-gold hover:underline mt-1 disabled:opacity-40">
+              {open.isPending ? '…' : 'start it'}
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

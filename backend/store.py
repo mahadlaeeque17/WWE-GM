@@ -257,6 +257,12 @@ def durable() -> tuple[bool, str]:
 
 
 def status() -> dict:
+    """What the store is doing, and whether it is safe to write.
+
+    `writable` is the one to look at when a save appears to have reset: False
+    means the app is running on the bundled seed and is deliberately refusing to
+    push it up over the real one.
+    """
     ok, detail = _configured()
     dur, dur_detail = durable()
     return {
@@ -276,6 +282,12 @@ def status() -> dict:
         "store_id_var": _STORE_ID_VAR or None,
         "put_variant": put_variant(),
         "etag": _etag or None,
+        # The write barrier. False means the app is running on the bundled seed
+        # and is refusing to push it up over the stored save — look here first
+        # if a save ever appears to have reset itself.
+        "writable": writable()[0],
+        "writable_detail": writable()[1],
+        "hydrated_ok": _hydrated_ok,
         **_last,
     }
 
@@ -641,6 +653,39 @@ def refresh(local: Path) -> bool:
         return False
 
 
+# ------------------------------------------------------- the write barrier
+#
+# THE HAZARD THIS CLOSES, and it is the worst one in the file.
+#
+# Boot does two things in order: copy the BUNDLED seed into place, then pull the
+# real save down over it. The bundled seed is a clean roster with no contracts
+# and no shows. So if the download fails — a network blip, an expired OIDC
+# token, a store that is briefly unreachable — the app comes up running happily
+# on an EMPTY SAVE, and the very next write pushes that empty save over the
+# player's real one. A season of work, gone, with no error anywhere: the app
+# never crashed, it just quietly persisted the wrong file.
+#
+# So writing is gated. `_hydrated_ok` is only true once we have actually
+# downloaded a save (or established that the store was legitimately empty and
+# seeded it ourselves). Until then `persist` refuses, loudly, and the reason is
+# on /api/store/status. Refusing to save is a bad afternoon; overwriting is a
+# lost save.
+_hydrated_ok = False
+
+
+def writable() -> tuple[bool, str]:
+    """Whether it is safe to push the local file up as the durable save."""
+    if not enabled():
+        return True, "local file is already durable"
+    if _hydrated_ok:
+        return True, "hydrated this boot"
+    return False, (
+        "the save was never successfully downloaded this boot, so the local file "
+        "may be the bundled seed rather than your game. Refusing to overwrite the "
+        "stored save. Check /api/store/status and restart once the store is "
+        "reachable.")
+
+
 def hydrate(local: Path, seed: Path | None = None) -> str:
     """Bring the durable save down to `local` before anything opens it.
 
@@ -654,18 +699,23 @@ def hydrate(local: Path, seed: Path | None = None) -> str:
         _last["error"] = why
         return f"store NOT configured: {why}"
 
+    global _hydrated_ok
     local.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     try:
         data = _get()
     except Exception as e:  # noqa: BLE001
         # Never take the service down over this — a readable error on
-        # /api/store/status beats a container that will not boot.
+        # /api/store/status beats a container that will not boot. But DO leave
+        # the write barrier closed: the local file is the bundled seed and
+        # pushing it up would destroy the real save. See `writable`.
+        _hydrated_ok = False
         _last["error"] = f"hydrate failed: {e}"
         return _last["error"]
 
     if data:
         local.write_bytes(data)
+        _hydrated_ok = True
         _last.update(hydrated=round(time.time() - t0, 2), error=None)
         # Reset the clock so the first request after boot does not immediately
         # re-check something we have this second.
@@ -673,6 +723,9 @@ def hydrate(local: Path, seed: Path | None = None) -> str:
         _last_check = time.monotonic()
         return f"hydrated {len(data):,} bytes from {MODE} in {_last['hydrated']}s"
 
+    # An EMPTY store is not a failure — it is the first ever boot, and seeding it
+    # from the bundle is exactly right. That is why the barrier opens here too:
+    # we know the remote held nothing, so there is nothing to overwrite.
     src = seed if seed and seed.exists() else (local if local.exists() else None)
     if src is None:
         _last["error"] = "no save in the store and no seed to upload"
@@ -684,17 +737,27 @@ def hydrate(local: Path, seed: Path | None = None) -> str:
     except Exception as e:  # noqa: BLE001
         _last["error"] = f"seed upload failed: {e}"
         return _last["error"]
+    _hydrated_ok = True
     _last.update(persisted=round(time.time() - t0, 2), error=None)
     return f"store was empty — seeded it from {src.name}"
 
 
 def persist(local: Path) -> str:
-    """Push the save back up. Called after a request that wrote something."""
+    """Push the save back up. Called after a request that wrote something.
+
+    REFUSES if this boot never managed to download the save — see the write
+    barrier above. Losing an afternoon's play to a refused write is recoverable;
+    overwriting a season with the bundled seed is not.
+    """
     if not enabled():
         return "store disabled"
     ok, why = _configured()
     if not ok:
         return f"store NOT configured: {why}"
+    safe, why = writable()
+    if not safe:
+        _last["error"] = f"persist BLOCKED: {why}"
+        return _last["error"]
     if not local.exists():
         return "nothing to persist"
     t0 = time.time()
